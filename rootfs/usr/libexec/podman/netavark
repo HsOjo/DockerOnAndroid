@@ -355,9 +355,11 @@ done
 LAUNCH_EOF
 chmod +x "$STATE/$cid.launch.sh"
 
-jq -s 'add // {}' $result_frags
+# shellcheck disable=SC2086 # intentional word splitting: frag list
+set -- $result_frags
+jq -s 'add // {}' "$@"
 rc=$?
-rm -f $result_frags
+rm -f "$@"
 [ "$rc" = 0 ] || { echo "netavark-pasta: failed to build result" >&2; exit 1; }
 log "setup $cid done nets=$nnets"
 exit 0

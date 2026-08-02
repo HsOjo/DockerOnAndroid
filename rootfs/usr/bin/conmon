@@ -1,5 +1,5 @@
 #!/bin/sh
-# conmon wrapper: real binary is /usr/bin/conmon.real (see install.sh).
+# DockerOnAndroid conmon wrapper: real binary is /usr/bin/conmon.real (see install.sh).
 # 1. close podman's published-port reservation sockets (inherited LISTEN
 #    fds) so per-container pasta can bind them
 # 2. hand off to the netavark shim's launch script, which needs exactly

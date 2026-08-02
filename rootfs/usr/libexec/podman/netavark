@@ -1,5 +1,5 @@
 #!/bin/sh
-# netavark shim: implements the netavark CLI (v1.13, podman 5.3) on top of
+# DockerOnAndroid netavark shim: implements the netavark CLI (v1.13, podman 5.3) on top of
 # patched pasta instead of kernel veth/bridge. Podman drives everything:
 #   setup <netns>    JSON on stdin -> state + aardvark records + result JSON
 #   teardown <netns> -> kill pastas, drop records/aliases
@@ -16,12 +16,18 @@
 # only the first non-internal network gets a default route.
 PATH=/usr/local/sbin:/usr/local/bin:/usr/bin:/usr/sbin:/bin:/sbin
 PASTA=/usr/local/bin/pasta
-REAL=/usr/libexec/podman/netavark.real
+REAL=
+DEF_AAVARK=
+for d in /usr/libexec/podman /usr/lib/podman; do
+  [ -z "$REAL" ] && [ -f "$d/netavark.real" ] && REAL=$d/netavark.real
+  [ -z "$DEF_AAVARK" ] && [ -f "$d/aardvark-dns" ] && DEF_AAVARK=$d/aardvark-dns
+done
+REAL=${REAL:-/usr/libexec/podman/netavark.real}
 STATE=/tmp/pasta/nv
 DEFAULT_DNS=223.5.5.5
 
 CONFIG=/run/containers/networks
-AAVARK=/usr/libexec/podman/aardvark-dns
+AAVARK=${DEF_AAVARK:-/usr/libexec/podman/aardvark-dns}
 DNS_PORT=${NETAVARK_DNS_PORT:-53}
 cmd=
 nsf=

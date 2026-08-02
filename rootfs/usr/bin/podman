@@ -1,5 +1,5 @@
 #!/bin/sh
-# podman wrapper: real binary is /usr/bin/podman.real (see install.sh).
+# DockerOnAndroid podman wrapper: real binary is /usr/bin/podman.real (see install.sh).
 # - export env podman needs on this kernel
 # - drop the noisy "Failed to read current user namespace mappings" warning
 #   that every rootful call prints on a kernel without user namespaces

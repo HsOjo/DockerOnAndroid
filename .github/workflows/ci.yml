@@ -1,0 +1,29 @@
+name: ci
+
+on: [push, pull_request]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: syntax check (sh -n)
+        run: |
+          set -e
+          for f in install.sh build-pasta.sh uninstall.sh \
+                   rootfs/usr/bin/podman rootfs/usr/bin/conmon \
+                   rootfs/usr/libexec/podman/netavark \
+                   rootfs/usr/local/bin/crun-nomq; do
+            echo "> $f"
+            sh -n "$f"
+          done
+
+      - name: shellcheck
+        run: |
+          sudo apt-get install -y shellcheck
+          shellcheck -s sh \
+            install.sh build-pasta.sh uninstall.sh \
+            rootfs/usr/bin/podman rootfs/usr/bin/conmon \
+            rootfs/usr/libexec/podman/netavark \
+            rootfs/usr/local/bin/crun-nomq

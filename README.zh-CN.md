@@ -69,7 +69,7 @@ podman 创建容器时会**主动 bind + LISTEN 每一个发布端口并持有 f
 ## 要求
 
 - 已 root 的 Android 设备（开发验证: Magisk 30.7, SELinux Permissive）
-- 一个 Linux 用户空间（开发验证: [LinuxOnAndroid](https://github.com/HsOjo/LinuxOnAndroid) musl guest）
+- 一个 Linux 用户空间 — 发行版不限（开发验证: [LinuxOnAndroid](https://github.com/HsOjo/LinuxOnAndroid) musl/Alpine guest）；`build-pasta.sh` 通过 apk / apt / dnf / pacman 自动安装构建依赖，podman libexec 目录（`/usr/libexec/podman` 或 `/usr/lib/podman`）在安装时自动探测
 - podman **5.3.2** + netavark **1.13.1** + aardvark-dns（版本绑定，见下文）
 - 内核含 `NET_NS` + `TUN`；设备能加载 tun
 
@@ -120,6 +120,7 @@ rootfs/
   usr/bin/podman              # wrapper: 过滤 userns 告警 + 环境注入
   usr/bin/conmon              # wrapper: 释放 LISTEN fd + 触发容器启动脚本
   usr/libexec/podman/netavark # 核心 shim: bridge 生命周期 / aardvark / 策略路由
+                              # (Debian 系安装到 /usr/lib/podman)
   usr/local/bin/crun-nomq     # crun wrapper: 剥离容器不支持的 cgroup 挂载
                               # (pasta 二进制由 build-pasta.sh 产出, 不入库)
   etc/containers/             # containers.conf / registries.conf 等

@@ -72,7 +72,7 @@ When creating a container, podman **actively binds + LISTENs on every published 
 ## Requirements
 
 - A rooted Android device (validated on: Magisk 30.7, SELinux Permissive)
-- A Linux userland (validated on: [LinuxOnAndroid](https://github.com/HsOjo/LinuxOnAndroid) musl guest)
+- A Linux userland — any distro (validated on: [LinuxOnAndroid](https://github.com/HsOjo/LinuxOnAndroid) musl/Alpine guest); `build-pasta.sh` installs build deps via apk / apt / dnf / pacman, and the podman libexec dir (`/usr/libexec/podman` vs `/usr/lib/podman`) is auto-detected at install time
 - podman **5.3.2** + netavark **1.13.1** + aardvark-dns (version-pinned, see below)
 - Kernel with `NET_NS` + `TUN`; device can load tun
 
@@ -123,6 +123,7 @@ rootfs/
   usr/bin/podman              # wrapper: userns warning filter + env injection
   usr/bin/conmon              # wrapper: release LISTEN fds + trigger launch script
   usr/libexec/podman/netavark # core shim: bridge lifecycle / aardvark / policy routing
+                              # (installed to /usr/lib/podman on Debian-likes)
   usr/local/bin/crun-nomq     # crun wrapper: strips unsupported cgroup mounts
                               # (pasta binary produced by build-pasta.sh, not tracked)
   etc/containers/             # containers.conf / registries.conf etc.

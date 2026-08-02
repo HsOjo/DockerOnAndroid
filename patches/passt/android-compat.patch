@@ -1,0 +1,150 @@
+diff --git a/conf.c b/conf.c
+index faf2681..5f01737 100644
+--- a/conf.c
++++ b/conf.c
+@@ -337,6 +337,9 @@ static void conf_pasta_ns(int *netns_only, char *userns, char *netns,
+ 				if (snprintf_check(userns, PATH_MAX,
+ 						   "/proc/%ld/ns/user", pidval))
+ 					die_perror("Can't build userns path");
++
++				if (access(userns, F_OK) && errno == ENOENT)
++					*userns = '\0';
+ 			}
+ 		}
+ 	}
+diff --git a/isolation.c b/isolation.c
+index 94cbe7f..9cbac61 100644
+--- a/isolation.c
++++ b/isolation.c
+@@ -93,6 +93,7 @@
+ #include "passt.h"
+ #include "log.h"
+ #include "isolation.h"
++#include "linux_dep.h"
+ #include "conf.h"
+ 
+ #define CAP_VERSION	_LINUX_CAPABILITY_VERSION_3
+@@ -235,6 +236,11 @@ void isolate_initial(void)
+ 	keep = BIT(CAP_NET_BIND_SERVICE) | BIT(CAP_SETUID) | BIT(CAP_SETGID) |
+ 	       BIT(CAP_SYS_ADMIN) | BIT(CAP_NET_ADMIN) | BIT(CAP_DAC_OVERRIDE) |
+ 	       BIT(CAP_SYS_CHROOT);
++	/* Keep CAP_NET_RAW: later stages can only mask down the current
++	 * effective set, and Android kernels before 5.7 require it for
++	 * SO_BINDTODEVICE on forwarded-port listeners
++	 */
++	keep |= BIT(CAP_NET_RAW);
+ 	/* Since Linux 5.12, if we want to update /proc/self/uid_map to create
+ 	 * a mapping from UID 0, which only happens with pasta spawning a child
+ 	 * from a non-init user namespace (pasta can't run as root), we need to
+@@ -360,6 +366,10 @@ void isolate_user(const struct ctx *c, uid_t uid, gid_t gid, bool use_userns,
+ 	if (c->mode == MODE_PASTA) {
+ 		/* Keep CAP_NET_ADMIN, so we can configure the if */
+ 		ns_caps |= BIT(CAP_NET_ADMIN);
++		/* Keep CAP_NET_RAW: Android requires it (or AID_INET
++		 * membership) to create any network socket at all
++		 */
++		ns_caps |= BIT(CAP_NET_RAW);
+ 		/* Keep CAP_NET_BIND_SERVICE, so we can splice
+ 		 * outbound connections to low port numbers
+ 		 */
+@@ -399,8 +409,11 @@ int isolate_prefork(const struct ctx *c)
+ 		flags |= CLONE_NEWPID;
+ 
+ 	if (unshare(flags)) {
+-		err_perror("Failed to detach isolating namespaces");
+-		return -errno;
++		if (errno != EINVAL ||
++		    unshare(flags & ~(CLONE_NEWIPC | CLONE_NEWPID))) {
++			err_perror("Failed to detach isolating namespaces");
++			return -errno;
++		}
+ 	}
+ 
+ 	if (mount("", "/", "", MS_UNBINDABLE | MS_REC, NULL)) {
+@@ -408,32 +421,42 @@ int isolate_prefork(const struct ctx *c)
+ 		return -errno;
+ 	}
+ 
++	bool tmpdir_failed = false;
++
+ 	if (mount("", TMPDIR, "tmpfs",
+ 		  MS_NODEV | MS_NOEXEC | MS_NOSUID | MS_RDONLY,
+ 		  "nr_inodes=2,nr_blocks=0")) {
+-		err_perror("Failed to mount empty tmpfs for sandboxing");
+-		return -errno;
++		if (errno != EINVAL ||
++		    mount("", TMPDIR, "tmpfs",
++			  MS_NODEV | MS_NOEXEC | MS_NOSUID | MS_RDONLY,
++			  "nr_inodes=2")) {
++			warn_perror("Failed to mount empty tmpfs for sandboxing");
++			warn("Continuing without empty tmpdir sandbox");
++			tmpdir_failed = true;
++		}
+ 	}
+ 
+-	if (chdir(TMPDIR)) {
++	if (!tmpdir_failed && chdir(TMPDIR)) {
+ 		err_perror("Failed to change directory into empty tmpfs");
+ 		return -errno;
+ 	}
+ 
+-	if (syscall(SYS_pivot_root, ".", ".")) {
+-		if (c->chroot_fallback) {
+-			int rc;
+-			info("Failed to pivot_root(), fallback to chroot()...");
+-			if ((rc = move_root()))
+-				return rc;
++	if (!tmpdir_failed) {
++		if (syscall(SYS_pivot_root, ".", ".")) {
++			if (c->chroot_fallback) {
++				int rc;
++				info("Failed to pivot_root(), fallback to chroot()...");
++				if ((rc = move_root()))
++					return rc;
++			} else {
++				err_perror("Failed to pivot_root() into empty tmpfs");
++				return -errno;
++			}
+ 		} else {
+-			err_perror("Failed to pivot_root() into empty tmpfs");
+-			return -errno;
+-		}
+-	} else {
+-		if (umount2(".", MNT_DETACH | UMOUNT_NOFOLLOW)) {
+-			err_perror("Failed to unmount original root filesystem");
+-			return -errno;
++			if (umount2(".", MNT_DETACH | UMOUNT_NOFOLLOW)) {
++				err_perror("Failed to unmount original root filesystem");
++				return -errno;
++			}
+ 		}
+ 	}
+ 
+@@ -447,6 +470,10 @@ int isolate_prefork(const struct ctx *c)
+ 		 * outbound connections to low port numbers
+ 		 */
+ 		ns_caps |= BIT(CAP_NET_BIND_SERVICE);
++		/* Keep CAP_NET_RAW: SO_BINDTODEVICE on forwarded-port
++		 * listeners requires it before kernel 5.7
++		 */
++		ns_caps |= BIT(CAP_NET_RAW);
+ 	}
+ 
+ 	clamp_caps();
+diff --git a/util.c b/util.c
+index bd4c6ca..7ab60a2 100644
+--- a/util.c
++++ b/util.c
+@@ -393,8 +393,11 @@ bool ns_is_init(void)
+ 	bool ret = true;
+ 	int fd;
+ 
+-	if ((fd = open("/proc/self/uid_map", O_RDONLY | O_CLOEXEC)) < 0)
++	if ((fd = open("/proc/self/uid_map", O_RDONLY | O_CLOEXEC)) < 0) {
++		if (errno == ENOENT)
++			return true;
+ 		die_perror("Can't determine if we're in init namespace");
++	}
+ 
+ 	if (read(fd, buf, sizeof(root_uid_map)) != sizeof(root_uid_map) - 1 ||
+ 	    strncmp(buf, root_uid_map, sizeof(root_uid_map)))

@@ -1,0 +1,57 @@
+#!/bin/sh
+bundle=
+state_root=/run/crun
+process_file=
+prev=
+for a in "$@"; do
+  case "$prev" in
+    --bundle|-b) bundle=$a;;
+    --root) state_root=$a;;
+    --process|-p) process_file=$a;;
+  esac
+  case "$a" in
+    --bundle=*) bundle=${a#--bundle=};;
+    --root=*) state_root=${a#--root=};;
+    --process=*) process_file=${a#--process=};;
+  esac
+  prev=$a
+done
+
+last=
+for a in "$@"; do last=$a; done
+
+if [ "${1:-}" = exec ] && [ -n "$last" ] && [ -f "$state_root/$last/status" ]; then
+  status_file=$state_root/$last/status
+  status_bk=$status_file.nomq-bk.$$
+  status_tmp=$status_file.nomq.$$
+  cp "$status_file" "$status_bk" || exit 1
+  if jq '."cgroup-path" = "" | .scope = "" | ."systemd-cgroup" = false' "$status_bk" > "$status_tmp"; then
+    cat "$status_tmp" > "$status_file"
+  fi
+  rm -f "$status_tmp"
+
+  if [ -n "$process_file" ] && [ -f "$process_file" ] && [ -f "$state_root/$last/config.json" ]; then
+    process_tmp=$process_file.nomq.$$
+    if jq --slurpfile cfg "$state_root/$last/config.json" '.user = $cfg[0].process.user' "$process_file" > "$process_tmp"; then
+      cat "$process_tmp" > "$process_file"
+    fi
+    rm -f "$process_tmp"
+  fi
+
+  /usr/bin/crun "$@"
+  rc=$?
+  cat "$status_bk" > "$status_file"
+  rm -f "$status_bk"
+  exit $rc
+fi
+
+case " $* " in
+  *" create "*|*" run "*)
+    if [ -n "$bundle" ] && [ -f "$bundle/config.json" ]; then
+      tmp=$bundle/config.json.nomq.$$
+      jq -f /usr/local/lib/crun-nomq.jq "$bundle/config.json" > "$tmp" && cat "$tmp" > "$bundle/config.json"
+      rm -f "$tmp"
+    fi
+    ;;
+esac
+exec /usr/bin/crun "$@"

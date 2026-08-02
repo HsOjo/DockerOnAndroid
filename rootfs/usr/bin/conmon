@@ -1,0 +1,39 @@
+#!/bin/sh
+# conmon wrapper: real binary is /usr/bin/conmon.real (see install.sh).
+# 1. close podman's published-port reservation sockets (inherited LISTEN
+#    fds) so per-container pasta can bind them
+# 2. hand off to the netavark shim's launch script, which needs exactly
+#    those ports (runs detached: it may block on boltdb while inspecting
+#    EXPOSE ports, and conmon must start the container immediately)
+STATE=/tmp/pasta/nv
+
+inodes=$(awk '$4=="0A"{print $10}' /proc/net/tcp /proc/net/tcp6 2>/dev/null
+         awk '$4=="07"{print $10}' /proc/net/udp /proc/net/udp6 2>/dev/null)
+if [ -n "$inodes" ]; then
+  for fd in $(ls /proc/self/fd 2>/dev/null); do
+    link=$(readlink /proc/self/fd/$fd 2>/dev/null) || continue
+    case $link in
+      socket:\[*\])
+        ino=${link#socket:\[}; ino=${ino%\]}
+        if printf '%s\n' "$inodes" | grep -qx "$ino"; then
+          eval "exec $fd<&-" 2>/dev/null
+          eval "exec $fd>&-" 2>/dev/null
+        fi
+        ;;
+    esac
+  done
+fi
+
+cid=
+prev=
+for a in "$@"; do
+  [ "$prev" = -c ] && cid=$a
+  prev=$a
+done
+case $cid in *[!0-9a-f]* | "") cid= ;; esac
+if [ -n "$cid" ] && [ -f "$STATE/$cid.launch.sh" ]; then
+  mv "$STATE/$cid.launch.sh" "$STATE/$cid.launch.run"
+  setsid sh "$STATE/$cid.launch.run" </dev/null >/dev/null 2>&1 &
+fi
+
+exec /usr/bin/conmon.real "$@"

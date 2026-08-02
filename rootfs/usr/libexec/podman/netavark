@@ -1,0 +1,357 @@
+#!/bin/sh
+# netavark shim: implements the netavark CLI (v1.13, podman 5.3) on top of
+# patched pasta instead of kernel veth/bridge. Podman drives everything:
+#   setup <netns>    JSON on stdin -> state + aardvark records + result JSON
+#   teardown <netns> -> kill pastas, drop records/aliases
+# Non-bridge drivers and unknown commands delegate to netavark.real.
+#
+# setup only writes state and $STATE/<cid>.launch.sh; the conmon wrapper
+# (usr/bin/conmon) runs it right after closing podman's port-reservation
+# sockets, so pasta always starts with the published ports already free.
+# The launch script resolves EXPOSE-only ports via podman inspect (blocks
+# until the create transaction commits; it runs detached, so that is fine),
+# then stays alive supervising one pasta per attached network.
+#
+# Limits: IPv4 only; host port publishing lands on the first network;
+# only the first non-internal network gets a default route.
+PATH=/usr/local/sbin:/usr/local/bin:/usr/bin:/usr/sbin:/bin:/sbin
+PASTA=/usr/local/bin/pasta
+REAL=/usr/libexec/podman/netavark.real
+STATE=/tmp/pasta/nv
+DEFAULT_DNS=223.5.5.5
+
+CONFIG=/run/containers/networks
+AAVARK=/usr/libexec/podman/aardvark-dns
+DNS_PORT=${NETAVARK_DNS_PORT:-53}
+cmd=
+nsf=
+while [ $# -gt 0 ]; do
+  case $1 in
+    --config) CONFIG=$2; shift 2;;
+    --rootless=*|--firewall-driver=*) shift;;
+    --aardvark-binary=*) AAVARK=${1#*=}; shift;;
+    --*) shift;;
+    *) if [ -z "$cmd" ]; then cmd=$1; else nsf=$1; fi; shift;;
+  esac
+done
+
+rotate() { # rotate <file> at 1MiB, keep one generation
+  f=$1
+  [ -f "$f" ] || return 0
+  s=$(stat -c %s "$f" 2>/dev/null) || return 0
+  [ "$s" -gt 1048576 ] && mv "$f" "$f.1" 2>/dev/null
+  return 0
+}
+log() { rotate /tmp/nv-shim.log; echo "$(date '+%F %T') $*" >> /tmp/nv-shim.log; }
+
+case $cmd in
+  version)
+    printf '{"version":"1.13.1-pasta","commit":"","target":"aarch64"}\n'
+    exit 0;;
+  update)
+    cat > /dev/null
+    printf '{}\n'
+    exit 0;;
+  firewall|firewalld_reload|dhcp-proxy)
+    cat > /dev/null 2>/dev/null
+    exit 0;;
+  setup|teardown) :;;
+  *) exec "$REAL" --config "$CONFIG" ${cmd:+$cmd} ${nsf:+$nsf};;
+esac
+
+[ -n "$nsf" ] || { echo "netavark-pasta: missing netns path" >&2; exit 1; }
+in=$(cat)
+mkdir -p "$STATE"
+printf '%s' "$in" > "$STATE/last-$cmd.json" 2>/dev/null
+
+cid=$(printf '%s' "$in" | jq -r '.container_id // empty')
+cname=$(printf '%s' "$in" | jq -r '.container_name // empty')
+[ -n "$cid" ] || { echo "netavark-pasta: no container_id" >&2; exit 1; }
+
+# Delegate when any attached network is not bridge.
+nonbridge=$(printf '%s' "$in" | jq -r '[.network_info[]?.driver] | map(select(. != "bridge")) | length' 2>/dev/null)
+if [ "${nonbridge:-0}" != "0" ]; then
+  printf '%s' "$in" | "$REAL" --config "$CONFIG" --aardvark-binary="$AAVARK" "$cmd" "$nsf"
+  exit $?
+fi
+
+valid_ip4() { printf '%s' "$1" | grep -Eq '^[0-9]{1,3}(\.[0-9]{1,3}){3}$'; }
+
+lo_alias_add() {
+  if ip addr show dev lo 2>/dev/null | grep -q "$1/32"; then return 0; fi
+  out=$(ip addr add "$1/32" dev lo 2>&1) || log "lo_alias_add $1 FAILED: $out"
+}
+
+aavark_dir=$CONFIG/aardvark-dns
+
+aavark_notify() {
+  pid=$(cat "$aavark_dir/aardvark.pid" 2>/dev/null)
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    kill -HUP "$pid" 2>/dev/null
+    return 0
+  fi
+  [ -x "$AAVARK" ] || return 0
+  rotate /tmp/nv-aardvark.log
+  "$AAVARK" --config "$aavark_dir" -p "$DNS_PORT" run >> /tmp/nv-aardvark.log 2>&1 &
+}
+
+nets=$(printf '%s' "$in" | jq -r '.networks | to_entries[] | "\(.value.interface_name // "eth9") \(.key)"' 2>/dev/null | sort | awk '{print $2}')
+
+aavark_file() { # $1=net $2=internal -> record file path
+  f=$aavark_dir/$1
+  [ "$2" = "true" ] && [ ! -f "$f" ] && f=$f%int
+  printf '%s' "$f"
+}
+
+if [ "$cmd" = teardown ]; then
+  log "teardown $cid ($cname)"
+  for net in $nets; do
+    dns_enabled=$(printf '%s' "$in" | jq -r ".network_info[\"$net\"].dns_enabled // false")
+    internal=$(printf '%s' "$in" | jq -r ".network_info[\"$net\"].internal // false")
+    [ "$dns_enabled" = "true" ] || continue
+    f=$(aavark_file "$net" "$internal")
+    [ -f "$f" ] || continue
+    grep -v "^$cid " "$f" > "$f.tmp" 2>/dev/null; cat "$f.tmp" > "$f"; rm -f "$f.tmp"
+    # only the gateway line left => last container on this network
+    if [ "$(wc -l < "$f" 2>/dev/null)" -le 1 ]; then
+      gw=$(printf '%s' "$in" | jq -r ".network_info[\"$net\"].subnets[0].gateway // empty")
+      valid_ip4 "$gw" && ip addr del "$gw/32" dev lo 2>/dev/null
+      rm -f "$f"
+    fi
+    aavark_notify
+  done
+  pids=
+  for p in "$STATE/$cid.pastapid".*; do
+    [ -f "$p" ] || continue
+    pids="$pids $(cat "$p" 2>/dev/null)"
+  done
+  aliases=$(cat "$STATE/$cid.ip" 2>/dev/null)
+  # remove state first: the launch.sh supervisor polls for it and exits
+  rm -f "$STATE/$cid".*
+  for pp in $pids; do kill "$pp" 2>/dev/null; done
+  for a in $aliases; do
+    valid_ip4 "$a" && ip addr del "$a/32" dev lo 2>/dev/null
+  done
+  exit 0
+fi
+
+# ---- setup ----
+nnets=$(printf '%s\n' "$nets" | grep -c .)
+log "setup $cid ($cname) nets=$(printf '%s' "$nets" | tr '\n' ',') nsf=$nsf"
+
+# pasta opens /dev/net/tun with dropped caps (egid aid_inet); Android creates
+# the node 1000:1016 0660, which survives only until reboot
+[ -c /dev/net/tun ] && { chgrp 3003 /dev/net/tun 2>/dev/null; chmod 660 /dev/net/tun 2>/dev/null; }
+
+dev=$(ip route get "$DEFAULT_DNS" 2>/dev/null | sed -n 's/.*dev \([^ ]*\).*/\1/p' | head -1)
+
+# published ports -> host bindings (docker semantics, incl. host_ip + ranges);
+# they land on the first network's pasta
+pubargs=
+cpublished=
+pmf=$STATE/$cid.pm
+printf '%s' "$in" | jq -c '.port_mappings[]? // empty' > "$pmf" 2>/dev/null
+while IFS= read -r pm; do
+  [ -n "$pm" ] || continue
+  cp=$(printf '%s' "$pm" | jq -r '.container_port // 0')
+  hp=$(printf '%s' "$pm" | jq -r '.host_port // 0')
+  hip=$(printf '%s' "$pm" | jq -r '.host_ip // ""')
+  range=$(printf '%s' "$pm" | jq -r '.range // 1')
+  protos=$(printf '%s' "$pm" | jq -r '.protocol // "tcp"' | tr ',' ' ')
+  [ "$cp" -gt 0 ] 2>/dev/null || continue
+  [ "$hp" -gt 0 ] 2>/dev/null || hp=$cp
+  i=0
+  while [ "$i" -lt "${range:-1}" ]; do
+    for pr in $protos; do
+      case $pr in
+        udp) t=u;;
+        tcp) t=t;;
+        *) continue;;
+      esac
+      hpi=$((hp+i)); cpi=$((cp+i))
+      if valid_ip4 "$hip"; then
+        pubargs="$pubargs -$t $hip/$hpi:$cpi"
+      else
+        pubargs="$pubargs -$t $hpi:$cpi"
+      fi
+      cpublished="$cpublished $t:$cpi"
+    done
+    i=$((i+1))
+  done
+done < "$pmf"
+rm -f "$pmf"
+
+first=1
+gwflag_done=
+: > "$STATE/$cid.ip"
+result_frags=
+for net in $nets; do
+  info=$(printf '%s' "$in" | jq -c ".network_info[\"$net\"] // {}")
+  pernet=$(printf '%s' "$in" | jq -c ".networks[\"$net\"] // {}")
+  subnet=$(printf '%s' "$info" | jq -r '.subnets[0].subnet // empty')
+  gw=$(printf '%s' "$info" | jq -r '.subnets[0].gateway // empty')
+  dns_enabled=$(printf '%s' "$info" | jq -r '.dns_enabled // false')
+  internal=$(printf '%s' "$info" | jq -r '.internal // false')
+  cip=$(printf '%s' "$pernet" | jq -r '.static_ips[0] // empty')
+  smac=$(printf '%s' "$pernet" | jq -r '.static_mac // empty')
+  ifn=$(printf '%s' "$pernet" | jq -r '.interface_name // empty')
+  if ! valid_ip4 "$cip"; then
+    echo "netavark-pasta: no usable static_ips for $cid on $net" >&2
+    exit 1
+  fi
+  [ -n "$ifn" ] || ifn=eth$((first-1))
+  valid_ip4 "$gw" || gw=${cip%.*}.1
+  prefix=${subnet#*/}
+  case $prefix in *[!0-9]*|""|*.*) prefix=24;; esac
+  [ -z "$smac" ] && smac=$(printf '%s' "$cid$net" | md5sum | sed 's/^\(..\)\(..\)\(..\)\(..\).*$/9a:55:\1:\2:\3:\4/')
+
+  # default route only on the first non-internal network; pasta copies the
+  # template gateway/LAN routes when -g is omitted, so units without -g
+  # get a post-config route flush (noroute). Non-internal secondary units
+  # additionally get source-based policy routing (tid) so replies egress
+  # the interface the traffic arrived on.
+  gwflag=
+  noroute=
+  tid=
+  if [ "$internal" != "true" ] && [ -z "$gwflag_done" ]; then
+    gwflag="-g $gw"
+    gwflag_done=1
+  fi
+  if [ -z "$gwflag" ]; then
+    noroute=1
+    [ "$internal" = "true" ] || tid=$((100+first))
+  fi
+
+  # host-side aliases: container IP (direct access) and gateway (DNS target)
+  lo_alias_add "$cip"
+  lo_alias_add "$gw"
+  printf '%s\n' "$cip" >> "$STATE/$cid.ip"
+
+  # per-network pasta args: cip-direct rules for published container ports
+  # (same-network peers reach them via the container address)
+  args=
+  [ "$first" = 1 ] && args=$pubargs
+  seen=
+  for e in $cpublished; do
+    case " $seen " in *" $e "*) continue;; esac
+    seen="$seen $e"
+    pr=${e%%:*}; cp=${e#*:}
+    [ -n "$cp" ] && args="$args -$pr $cip/$cp:$cp"
+  done
+  printf '%s\n' "$args" | sed 's/^ //' > "$STATE/$cid.pastaargs.$net"
+  cat > "$STATE/$cid.unit.$net" <<EOF
+ifn="$ifn" cip="$cip" prefix="$prefix" gw="$gw" gwflag="$gwflag" smac="$smac" dev="$dev" noroute="$noroute" tid="$tid"
+EOF
+
+  if [ "$dns_enabled" = "true" ]; then
+    mkdir -p "$aavark_dir"
+    f=$(aavark_file "$net" "$internal")
+    [ -f "$f" ] || printf '%s\n' "$gw" > "$f"
+    names=$cname
+    for a in $(printf '%s' "$pernet" | jq -r '.aliases[]? // empty'); do
+      case ,$names, in *,$a,*) :;; *) names="$names,$a";; esac
+    done
+    grep -v "^$cid " "$f" > "$f.tmp" 2>/dev/null; cat "$f.tmp" > "$f"; rm -f "$f.tmp"
+    printf '%s %s  %s\n' "$cid" "$cip" "$names" >> "$f"
+  fi
+
+  if [ "$dns_enabled" = "true" ]; then dnsjson="[\"$gw\"]"; else dnsjson="null"; fi
+  frag=$STATE/$cid.frag.$net
+  jq -n --arg net "$net" --arg ifn "$ifn" --arg mac "$smac" --arg ipnet "$cip/$prefix" --arg gw "$gw" --argjson dns "$dnsjson" \
+    '{($net): {dns_search_domains: null, dns_server_ips: $dns, interfaces: {($ifn): {mac_address: $mac, subnets: [{gateway: $gw, ipnet: $ipnet}]}}}}' > "$frag"
+  result_frags="$result_frags $frag"
+  [ "$dns_enabled" = "true" ] && any_dns=1
+  first=$((first+1))
+done
+[ -n "$any_dns" ] && aavark_notify
+
+# The conmon wrapper runs this script after closing podman's
+# port-reservation sockets.
+cat > "$STATE/$cid.launch.sh" <<EOF
+#!/bin/sh
+STATE="$STATE"; cid="$cid"; nsf="$nsf"; PASTA="$PASTA"
+EOF
+cat >> "$STATE/$cid.launch.sh" <<'LAUNCH_EOF'
+log=$STATE/$cid.log
+[ -f "$log" ] && [ "$(stat -c %s "$log" 2>/dev/null)" -gt 1048576 ] 2>/dev/null && mv "$log" "$log.1"
+
+exp=$(/usr/bin/podman.real inspect -f '{{range $p,$_ := .Config.ExposedPorts}}{{$p}} {{end}}' "$cid" 2>/dev/null)
+
+start_unit() { # $1=net
+  un=$1
+  . "$STATE/$cid.unit.$un"
+  set -- $(cat "$STATE/$cid.pastaargs.$un" 2>/dev/null)
+  for pe in $exp; do
+    pp=${pe%%/*}; pr=${pe#*/}
+    [ "$pp" -gt 0 ] 2>/dev/null || continue
+    case $pr in udp) t=u;; *) t=t;; esac
+    case " $* " in *" $cip/$pp:$pp "*) :;; *) set -- "$@" -$t "$cip/$pp:$pp";; esac
+  done
+  i=0
+  while [ "$i" -lt 6 ]; do
+    "$PASTA" -f --config-net --runas 0:3003 --chroot-fallback --no-map-gw \
+      -T none -U none -I "$ifn" \
+      ${dev:+--interface "$dev"} -a "$cip" -n "$prefix" $gwflag \
+      "$@" --netns "$nsf" >> "$log" 2>&1 &
+    pp=$!
+    sleep 1
+    if kill -0 "$pp" 2>/dev/null; then
+      echo "$pp" > "$STATE/$cid.pastapid.$un"
+      return 0
+    fi
+    i=$((i+1)); sleep 0.5
+  done
+  return 1
+}
+
+fixns_unit() { # $1=net
+  . "$STATE/$cid.unit.$1"
+  i=0
+  while [ "$i" -lt 40 ]; do
+    nsenter --net="$nsf" ip link show "$ifn" >/dev/null 2>&1 && break
+    i=$((i+1)); sleep 0.25
+  done
+  nsenter --net="$nsf" ip link set lo up 2>/dev/null
+  nsenter --net="$nsf" ip link set "$ifn" address "$smac" 2>/dev/null
+  if [ "$noroute" = 1 ]; then
+    nsenter --net="$nsf" ip route show dev "$ifn" 2>/dev/null | grep -v "src $cip" | while read -r r; do
+      [ -n "$r" ] && nsenter --net="$nsf" ip route del $r 2>/dev/null
+    done
+  fi
+  if [ -n "$tid" ]; then
+    nsenter --net="$nsf" ip rule 2>/dev/null | grep -q "from $cip" || \
+      nsenter --net="$nsf" ip rule add from "$cip" table "$tid" 2>/dev/null
+    nsenter --net="$nsf" ip route add default via "$gw" dev "$ifn" table "$tid" 2>/dev/null
+  fi
+}
+
+for u in "$STATE/$cid.unit".*; do
+  [ -f "$u" ] || continue
+  n=${u##*.}
+  start_unit "$n" || { echo "$(date '+%F %T') launch $cid $n pasta gave up" >> /tmp/nv-shim.log; continue; }
+  fixns_unit "$n"
+  echo "$(date '+%F %T') launch $cid $n pasta up pid=$(cat "$STATE/$cid.pastapid.$n" 2>/dev/null)" >> /tmp/nv-shim.log
+done
+
+while :; do
+  sleep 5
+  [ -f "$STATE/$cid.ip" ] || exit 0
+  for p in "$STATE/$cid.pastapid".*; do
+    [ -f "$p" ] || continue
+    n=${p##*.}
+    pp=$(cat "$p" 2>/dev/null)
+    [ -n "$pp" ] && kill -0 "$pp" 2>/dev/null && continue
+    start_unit "$n" || continue
+    fixns_unit "$n"
+    echo "$(date '+%F %T') supervise $cid $n pasta relaunched pid=$(cat "$p" 2>/dev/null)" >> /tmp/nv-shim.log
+  done
+done
+LAUNCH_EOF
+chmod +x "$STATE/$cid.launch.sh"
+
+jq -s 'add // {}' $result_frags
+rc=$?
+rm -f $result_frags
+[ "$rc" = 0 ] || { echo "netavark-pasta: failed to build result" >&2; exit 1; }
+log "setup $cid done nets=$nnets"
+exit 0

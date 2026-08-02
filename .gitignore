@@ -1,0 +1,5 @@
+.DS_Store
+/passt-src/
+/rootfs/usr/local/bin/pasta
+*.log
+*.tmp

@@ -75,11 +75,11 @@ podman 创建容器时会**主动 bind + LISTEN 每一个发布端口并持有 f
 
 ## 安装
 
-在宿主机（能 ssh 到设备）上：
+用任意方式（ssh / adb / ...）把本仓库拷到设备上，然后**在设备上执行**：
 
 ```sh
 ./build-pasta.sh      # 首次: 构建 pasta (见下节), 产出 rootfs/usr/local/bin/pasta (二进制不入库)
-./install.sh          # 推送 rootfs 到设备, 首次安装自动备份 podman/conmon/netavark 为 *.real
+./install.sh          # 把 ./rootfs 安装到 /, 首次安装自动备份 podman/conmon/netavark 为 *.real
 ```
 
 设备端验证：
@@ -93,14 +93,16 @@ podman rm -f web
 
 ## 从源码重建 pasta
 
+在设备上执行；设备如需代理可通过 `PROXY` 指定：
+
 ```sh
-./build-pasta.sh      # clone passt (固定 tag) -> 应用 patches/ -> 推送源码到设备 make -> 回收二进制
+PROXY=http://<proxy>:<port> ./build-pasta.sh   # clone passt (固定 tag) -> 应用 patches/ -> make -> rootfs/
 ```
 
 ## 卸载
 
 ```sh
-./uninstall.sh        # 停掉所有 pasta/容器, 用 *.real 恢复官方 podman/conmon/netavark
+./uninstall.sh        # 在设备上执行: 停掉所有 pasta/容器, 用 *.real 恢复官方 podman/conmon/netavark
 ```
 
 ## 已知限制

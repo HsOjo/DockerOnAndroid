@@ -78,11 +78,11 @@ When creating a container, podman **actively binds + LISTENs on every published 
 
 ## Install
 
-On the host machine (with ssh access to the device):
+Copy this repo onto the device however you like (ssh / adb / ...), then **run on the device**:
 
 ```sh
 ./build-pasta.sh      # first time: build pasta (see below), outputs rootfs/usr/local/bin/pasta (binary not tracked)
-./install.sh          # pushes rootfs to the device; backs up podman/conmon/netavark as *.real on first install
+./install.sh          # installs ./rootfs into /; backs up podman/conmon/netavark as *.real on first install
 ```
 
 Verify on the device:
@@ -96,14 +96,16 @@ podman rm -f web
 
 ## Rebuilding pasta from source
 
+Runs on the device; set `PROXY` if it needs one to reach the internet:
+
 ```sh
-./build-pasta.sh      # clone passt (pinned tag) -> apply patches/ -> push source to device & make -> fetch binary
+PROXY=http://<proxy>:<port> ./build-pasta.sh   # clone passt (pinned tag) -> apply patches/ -> make -> rootfs/
 ```
 
 ## Uninstall
 
 ```sh
-./uninstall.sh        # stops all pasta/containers, restores official podman/conmon/netavark from *.real
+./uninstall.sh        # run on the device: stops all pasta/containers, restores official podman/conmon/netavark from *.real
 ```
 
 ## Known limitations

@@ -278,6 +278,13 @@ cat > "$STATE/$cid.launch.sh" <<EOF
 STATE="$STATE"; cid="$cid"; nsf="$nsf"; PASTA="$PASTA"
 EOF
 cat >> "$STATE/$cid.launch.sh" <<'LAUNCH_EOF'
+# one supervisor per container: a relaunch (network reload) while the old
+# supervisor is alive must not spawn a second one; the lock lives outside
+# the teardown wipe pattern ($cid.*) so the same inode is locked throughout;
+# pasta closes fd 9
+exec 9>"$STATE/lock-$cid"
+flock -n 9 2>/dev/null || exit 0
+
 log=$STATE/$cid.log
 [ -f "$log" ] && [ "$(stat -c %s "$log" 2>/dev/null)" -gt 1048576 ] 2>/dev/null && mv "$log" "$log.1"
 
@@ -298,7 +305,7 @@ start_unit() { # $1=net
     "$PASTA" -f --config-net --runas 0:3003 --chroot-fallback --no-map-gw \
       -T none -U none -I "$ifn" \
       ${dev:+--interface "$dev"} -a "$cip" -n "$prefix" $gwflag \
-      "$@" --netns "$nsf" >> "$log" 2>&1 &
+      "$@" --netns "$nsf" >> "$log" 2>&1 9>&- &
     pp=$!
     sleep 1
     if kill -0 "$pp" 2>/dev/null; then
@@ -341,19 +348,36 @@ done
 
 while :; do
   sleep 5
-  [ -f "$STATE/$cid.ip" ] || exit 0
-  for p in "$STATE/$cid.pastapid".*; do
-    [ -f "$p" ] || continue
-    n=${p##*.}
-    pp=$(cat "$p" 2>/dev/null)
+  [ -f "$STATE/$cid.ip" ] || { rm -f "$STATE/lock-$cid"; exit 0; }
+  # iterate unit files (not pastapid files): teardown wipes pastapids, and
+  # on a network reload the surviving supervisor must revive pasta from scratch
+  for u in "$STATE/$cid.unit".*; do
+    [ -f "$u" ] || continue
+    n=${u##*.}
+    pp=$(cat "$STATE/$cid.pastapid.$n" 2>/dev/null)
     [ -n "$pp" ] && kill -0 "$pp" 2>/dev/null && continue
     start_unit "$n" || continue
     fixns_unit "$n"
-    echo "$(date '+%F %T') supervise $cid $n pasta relaunched pid=$(cat "$p" 2>/dev/null)" >> /tmp/nv-shim.log
+    echo "$(date '+%F %T') supervise $cid $n pasta relaunched pid=$(cat "$STATE/$cid.pastapid.$n" 2>/dev/null)" >> /tmp/nv-shim.log
   done
 done
 LAUNCH_EOF
 chmod +x "$STATE/$cid.launch.sh"
+
+# network reload path: podman reloads by teardown+setup on a *live* container
+# without involving conmon, so nothing else will run the launch script; if the
+# netns is already occupied, start pasta ourselves (create flow leaves the
+# netns empty until crun joins it, so this never fires on container start).
+nsino=$(stat -Lc %i "$nsf" 2>/dev/null || echo _)
+live=
+for pn in /proc/[0-9]*/ns/net; do
+  case $(readlink "$pn" 2>/dev/null) in "net:[$nsino]") live=1; break;; esac
+done
+if [ -n "$live" ] && [ -f "$STATE/$cid.launch.sh" ]; then
+  log "setup $cid netns already live (network reload); self-launching pasta"
+  mv "$STATE/$cid.launch.sh" "$STATE/$cid.launch.run"
+  setsid sh "$STATE/$cid.launch.run" </dev/null >/dev/null 2>&1 &
+fi
 
 # shellcheck disable=SC2086 # intentional word splitting: frag list
 set -- $result_frags

@@ -17,6 +17,7 @@
 这意味着 podman 官方的 netavark bridge 驱动、slirp4netns、以及真正的 veth 对全部不可用。本方案用**打过补丁的 [passt/pasta](https://passt.top/)**（纯用户态 TCP/UDP 转发，只依赖 TUN）作为数据面，通过三个极小的 wrapper 把 pasta 无缝接入 podman 的网络生命周期，最终实现：
 
 - `docker run -p` / `-P` / UDP 发布，语义与上游完全一致
+- IPv6 / 双栈网络（`podman network create --ipv6`）：v6 入站/出站、AAAA DNS、按 family 策略路由
 - `docker ps` / `inspect` 原生显示 PORTS / IP / MAC
 - 多网络容器（`-I` 多接口）+ 源地址策略路由
 - `internal` 网络（无外网，网内互联）
@@ -110,7 +111,7 @@ PROXY=http://<proxy>:<port> ./build-pasta.sh   # clone passt (固定 tag) -> 应
 
 ## 已知限制
 
-- **IPv4 only**：shim 暂未生成 IPv6 转发规则。
+- **v4-only 网络的 IPv6 语义**：为使发布端口在双栈可达，该网络的容器会持有宿主 v6 地址（pasta 共享地址模式）且可能获得 v6 默认路由——不要把"容器无 v6 出站"当成隔离手段（`internal` 网络会彻底清刷另一族的地址与路由，不受此影响）。
 - **非真 L2 隔离**：容器间隔离靠 IP 层 + 路由实现，不等价于 veth bridge 的二层隔离；主机防火墙亦不可用（内核无 netfilter）。
 - **internal 网络的 "无外网" 通过清刷容器路由表实现**，执意提权的容器可重新加回默认路由。
 - **EXPOSE 互联依赖异步 inspect**（容器启动后瞬时查询自身配置），极端时序下首条规则可能晚到数秒。

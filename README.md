@@ -17,6 +17,7 @@ A typical Android kernel (e.g. the 4.4.302 on the target device, a Xiaomi whyred
 This means podman's official netavark bridge driver, slirp4netns, and real veth pairs are all unusable. This project uses a **patched [passt/pasta](https://passt.top/)** (pure userspace TCP/UDP forwarding, requiring only TUN) as the data plane, and plugs pasta seamlessly into podman's network lifecycle via three tiny wrappers. The result:
 
 - `docker run -p` / `-P` / UDP publishing, semantics identical to upstream
+- IPv6 / dual-stack networks (`podman network create --ipv6`): v6 inbound/outbound, AAAA DNS, per-family policy routing
 - `docker ps` / `inspect` natively show PORTS / IP / MAC
 - Multi-network containers (`-I` multi-interface) + source-based policy routing
 - `internal` networks (no outbound, in-network connectivity)
@@ -113,7 +114,7 @@ PROXY=http://<proxy>:<port> ./build-pasta.sh   # clone passt (pinned tag) -> app
 
 ## Known limitations
 
-- **IPv4 only**: the shim does not generate IPv6 forwarding rules yet.
+- **IPv6 semantics on v4-only networks**: to keep published ports reachable over both stacks, containers on such networks hold the host's v6 addresses (pasta shared-address mode) and may get a v6 default route — do not rely on "container has no v6 egress" as isolation (`internal` networks strip the other family's addresses and routes entirely and are unaffected).
 - **Not true L2 isolation**: inter-container isolation is implemented at the IP layer + routing, not equivalent to veth-bridge layer-2 isolation; host firewall is also unavailable (no netfilter in kernel).
 - **"No outbound" on internal networks is enforced by flushing the container's route table** — a determined privileged container can add a default route back.
 - **EXPOSE connectivity relies on an asynchronous inspect** (querying the container's own config right after start); under extreme timing the first rule may arrive seconds late.

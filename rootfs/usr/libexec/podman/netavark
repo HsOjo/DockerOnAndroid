@@ -12,8 +12,8 @@
 # until the create transaction commits; it runs detached, so that is fine),
 # then stays alive supervising one pasta per attached network.
 #
-# Limits: IPv4 only; host port publishing lands on the first network;
-# only the first non-internal network gets a default route.
+# Limits: host port publishing lands on the first network;
+# only the first non-internal network gets a default route (per family).
 PATH=/usr/local/sbin:/usr/local/bin:/usr/bin:/usr/sbin:/bin:/sbin
 PASTA=/usr/local/bin/pasta
 REAL=
@@ -82,10 +82,23 @@ if [ "${nonbridge:-0}" != "0" ]; then
 fi
 
 valid_ip4() { printf '%s' "$1" | grep -Eq '^[0-9]{1,3}(\.[0-9]{1,3}){3}$'; }
+is_ip6() { case $1 in *:*) return 0;; *) return 1;; esac; }
 
+# lo aliases: v4 /32 and v6 /128 (host-side bind targets for pasta and
+# aardvark); $1=addr
 lo_alias_add() {
-  if ip addr show dev lo 2>/dev/null | grep -q "$1/32"; then return 0; fi
-  out=$(ip addr add "$1/32" dev lo 2>&1) || log "lo_alias_add $1 FAILED: $out"
+  if is_ip6 "$1"; then
+    ip -6 addr show dev lo 2>/dev/null | grep -q "$1/128" && return 0
+    out=$(ip -6 addr add "$1/128" dev lo 2>&1) || log "lo_alias_add $1 FAILED: $out"
+  else
+    ip addr show dev lo 2>/dev/null | grep -q "$1/32" && return 0
+    out=$(ip addr add "$1/32" dev lo 2>&1) || log "lo_alias_add $1 FAILED: $out"
+  fi
+}
+
+lo_alias_del() {
+  if is_ip6 "$1"; then ip -6 addr del "$1/128" dev lo 2>/dev/null
+  else ip addr del "$1/32" dev lo 2>/dev/null; fi
 }
 
 aavark_dir=$CONFIG/aardvark-dns
@@ -120,8 +133,9 @@ if [ "$cmd" = teardown ]; then
     grep -v "^$cid " "$f" > "$f.tmp" 2>/dev/null; cat "$f.tmp" > "$f"; rm -f "$f.tmp"
     # only the gateway line left => last container on this network
     if [ "$(wc -l < "$f" 2>/dev/null)" -le 1 ]; then
-      gw=$(printf '%s' "$in" | jq -r ".network_info[\"$net\"].subnets[0].gateway // empty")
-      valid_ip4 "$gw" && ip addr del "$gw/32" dev lo 2>/dev/null
+      for gw in $(printf '%s' "$in" | jq -r ".network_info[\"$net\"].subnets[]?.gateway // empty"); do
+        lo_alias_del "$gw"
+      done
       rm -f "$f"
     fi
     aavark_notify
@@ -136,7 +150,7 @@ if [ "$cmd" = teardown ]; then
   rm -f "$STATE/$cid".*
   for pp in $pids; do kill "$pp" 2>/dev/null; done
   for a in $aliases; do
-    valid_ip4 "$a" && ip addr del "$a/32" dev lo 2>/dev/null
+    lo_alias_del "$a"
   done
   exit 0
 fi
@@ -177,6 +191,8 @@ while IFS= read -r pm; do
       hpi=$((hp+i)); cpi=$((cp+i))
       if valid_ip4 "$hip"; then
         pubargs="$pubargs -$t $hip/$hpi:$cpi"
+      elif is_ip6 "$hip"; then
+        pubargs="$pubargs -$t [$hip]/$hpi:$cpi"
       else
         pubargs="$pubargs -$t $hpi:$cpi"
       fi
@@ -194,44 +210,56 @@ result_frags=
 for net in $nets; do
   info=$(printf '%s' "$in" | jq -c ".network_info[\"$net\"] // {}")
   pernet=$(printf '%s' "$in" | jq -c ".networks[\"$net\"] // {}")
-  subnet=$(printf '%s' "$info" | jq -r '.subnets[0].subnet // empty')
-  gw=$(printf '%s' "$info" | jq -r '.subnets[0].gateway // empty')
   dns_enabled=$(printf '%s' "$info" | jq -r '.dns_enabled // false')
   internal=$(printf '%s' "$info" | jq -r '.internal // false')
-  cip=$(printf '%s' "$pernet" | jq -r '.static_ips[0] // empty')
+  # addresses/subnets are per-family lists; match by family
+  cip4=$(printf '%s' "$pernet" | jq -r '[.static_ips[]? | select(contains(":") | not)] | .[0] // empty')
+  cip6=$(printf '%s' "$pernet" | jq -r '[.static_ips[]? | select(contains(":"))] | .[0] // empty')
+  subnet4=$(printf '%s' "$info" | jq -r '[.subnets[]? | select(.subnet | contains(":") | not)] | .[0].subnet // empty')
+  gw4=$(printf '%s' "$info" | jq -r '[.subnets[]? | select(.subnet | contains(":") | not)] | .[0].gateway // empty')
+  subnet6=$(printf '%s' "$info" | jq -r '[.subnets[]? | select(.subnet | contains(":"))] | .[0].subnet // empty')
+  gw6=$(printf '%s' "$info" | jq -r '[.subnets[]? | select(.subnet | contains(":"))] | .[0].gateway // empty')
   smac=$(printf '%s' "$pernet" | jq -r '.static_mac // empty')
   ifn=$(printf '%s' "$pernet" | jq -r '.interface_name // empty')
-  if ! valid_ip4 "$cip"; then
+  if ! valid_ip4 "$cip4" && ! is_ip6 "$cip6"; then
     echo "netavark-pasta: no usable static_ips for $cid on $net" >&2
     exit 1
   fi
   [ -n "$ifn" ] || ifn=eth$((first-1))
-  valid_ip4 "$gw" || gw=${cip%.*}.1
-  prefix=${subnet#*/}
-  case $prefix in *[!0-9]*|""|*.*) prefix=24;; esac
+  [ -n "$cip4" ] && { valid_ip4 "$gw4" || gw4=${cip4%.*}.1; }
+  prefix4=${subnet4#*/}
+  case $prefix4 in *[!0-9]*|""|*.*) prefix4=24;; esac
+  [ -n "$cip4" ] || prefix4=
+  prefix6=${subnet6#*/}
+  case $prefix6 in *[!0-9]*) prefix6=64;; esac
+  [ -n "$cip6" ] || prefix6=
   [ -z "$smac" ] && smac=$(printf '%s' "$cid$net" | md5sum | sed 's/^\(..\)\(..\)\(..\)\(..\).*$/9a:55:\1:\2:\3:\4/')
 
-  # default route only on the first non-internal network; pasta copies the
-  # template gateway/LAN routes when -g is omitted, so units without -g
-  # get a post-config route flush (noroute). Non-internal secondary units
-  # additionally get source-based policy routing (tid) so replies egress
-  # the interface the traffic arrived on.
-  gwflag=
+  # default route only on the first non-internal network (per family); pasta
+  # copies the template gateway/LAN routes when -g is omitted, so units
+  # without -g get a post-config route flush (noroute). Non-internal
+  # secondary units additionally get source-based policy routing (tid) so
+  # replies egress the interface the traffic arrived on.
+  gwflag4=
+  gwflag6=
   noroute=
   tid=
   if [ "$internal" != "true" ] && [ -z "$gwflag_done" ]; then
-    gwflag="-g $gw"
+    [ -n "$gw4" ] && gwflag4="-g $gw4"
+    is_ip6 "$gw6" && gwflag6="-g $gw6"
     gwflag_done=1
   fi
-  if [ -z "$gwflag" ]; then
+  if [ -z "$gwflag4" ] && [ -z "$gwflag6" ]; then
     noroute=1
     [ "$internal" = "true" ] || tid=$((100+first))
   fi
 
-  # host-side aliases: container IP (direct access) and gateway (DNS target)
-  lo_alias_add "$cip"
-  lo_alias_add "$gw"
-  printf '%s\n' "$cip" >> "$STATE/$cid.ip"
+  # host-side aliases: container IPs (direct access) and gateways (DNS target)
+  for a in "$cip4" "$cip6" "$gw4" "$gw6"; do
+    [ -n "$a" ] && lo_alias_add "$a"
+  done
+  [ -n "$cip4" ] && printf '%s\n' "$cip4" >> "$STATE/$cid.ip"
+  [ -n "$cip6" ] && printf '%s\n' "$cip6" >> "$STATE/$cid.ip"
 
   # per-network pasta args: cip-direct rules for published container ports
   # (same-network peers reach them via the container address)
@@ -242,29 +270,41 @@ for net in $nets; do
     case " $seen " in *" $e "*) continue;; esac
     seen="$seen $e"
     pr=${e%%:*}; cp=${e#*:}
-    [ -n "$cp" ] && args="$args -$pr $cip/$cp:$cp"
+    [ -n "$cp" ] || continue
+    [ -n "$cip4" ] && args="$args -$pr $cip4/$cp:$cp"
+    [ -n "$cip6" ] && args="$args -$pr [$cip6]/$cp:$cp"
   done
   printf '%s\n' "$args" | sed 's/^ //' > "$STATE/$cid.pastaargs.$net"
   cat > "$STATE/$cid.unit.$net" <<EOF
-ifn="$ifn" cip="$cip" prefix="$prefix" gw="$gw" gwflag="$gwflag" smac="$smac" dev="$dev" noroute="$noroute" tid="$tid"
+ifn="$ifn" cip4="$cip4" cip6="$cip6" prefix4="$prefix4" gw4="$gw4" gw6="$gw6" gwflag4="$gwflag4" gwflag6="$gwflag6" smac="$smac" dev="$dev" noroute="$noroute" tid="$tid"
 EOF
 
   if [ "$dns_enabled" = "true" ]; then
     mkdir -p "$aavark_dir"
     f=$(aavark_file "$net" "$internal")
-    [ -f "$f" ] || printf '%s\n' "$gw" > "$f"
+    # aardvark format: first line = comma-separated bind IPs; record lines =
+    # "<id> <v4> <v6> <names>" (single space per field, empty field = none)
+    if [ ! -f "$f" ]; then
+      gws=$gw4
+      [ -n "$gw6" ] && gws="${gws:+$gws,}$gw6"
+      printf '%s\n' "$gws" > "$f"
+    fi
     names=$cname
     for a in $(printf '%s' "$pernet" | jq -r '.aliases[]? // empty'); do
       case ,$names, in *,$a,*) :;; *) names="$names,$a";; esac
     done
     grep -v "^$cid " "$f" > "$f.tmp" 2>/dev/null; cat "$f.tmp" > "$f"; rm -f "$f.tmp"
-    printf '%s %s  %s\n' "$cid" "$cip" "$names" >> "$f"
+    printf '%s %s %s %s\n' "$cid" "$cip4" "$cip6" "$names" >> "$f"
   fi
 
-  if [ "$dns_enabled" = "true" ]; then dnsjson="[\"$gw\"]"; else dnsjson="null"; fi
+  if [ "$dns_enabled" = "true" ]; then
+    dnsjson=$(jq -n --arg a "$gw4" --arg b "$gw6" '[$a, $b] | map(select(. != ""))')
+  else dnsjson="null"; fi
+  snjson=$(jq -n --arg gw4 "$gw4" --arg ip4 "${cip4:+$cip4/$prefix4}" --arg gw6 "$gw6" --arg ip6 "${cip6:+$cip6/$prefix6}" \
+    '[[$gw4, $ip4], [$gw6, $ip6]] | map(select(.[0] != "" and .[1] != "")) | map({gateway: .[0], ipnet: .[1]})')
   frag=$STATE/$cid.frag.$net
-  jq -n --arg net "$net" --arg ifn "$ifn" --arg mac "$smac" --arg ipnet "$cip/$prefix" --arg gw "$gw" --argjson dns "$dnsjson" \
-    '{($net): {dns_search_domains: null, dns_server_ips: $dns, interfaces: {($ifn): {mac_address: $mac, subnets: [{gateway: $gw, ipnet: $ipnet}]}}}}' > "$frag"
+  jq -n --arg net "$net" --arg ifn "$ifn" --arg mac "$smac" --argjson dns "$dnsjson" --argjson subnets "$snjson" \
+    '{($net): {dns_search_domains: null, dns_server_ips: $dns, interfaces: {($ifn): {mac_address: $mac, subnets: $subnets}}}}' > "$frag"
   result_frags="$result_frags $frag"
   [ "$dns_enabled" = "true" ] && any_dns=1
   first=$((first+1))
@@ -273,6 +313,7 @@ done
 
 # The conmon wrapper runs this script after closing podman's
 # port-reservation sockets.
+printf '%s' "$nsf" > "$STATE/$cid.nsf"
 cat > "$STATE/$cid.launch.sh" <<EOF
 #!/bin/sh
 STATE="$STATE"; cid="$cid"; nsf="$nsf"; PASTA="$PASTA"
@@ -298,13 +339,20 @@ start_unit() { # $1=net
     pp=${pe%%/*}; pr=${pe#*/}
     [ "$pp" -gt 0 ] 2>/dev/null || continue
     case $pr in udp) t=u;; *) t=t;; esac
-    case " $* " in *" $cip/$pp:$pp "*) :;; *) set -- "$@" -$t "$cip/$pp:$pp";; esac
+    if [ -n "$cip4" ]; then
+      case " $* " in *" $cip4/$pp:$pp "*) :;; *) set -- "$@" -$t "$cip4/$pp:$pp";; esac
+    fi
+    if [ -n "$cip6" ]; then
+      case " $* " in *" [$cip6]/$pp:$pp "*) :;; *) set -- "$@" -$t "[$cip6]/$pp:$pp";; esac
+    fi
   done
   i=0
   while [ "$i" -lt 6 ]; do
+    # shellcheck disable=SC2086 # intentional: ${var:+-a "$var"} word pairs
     "$PASTA" -f --config-net --runas 0:3003 --chroot-fallback --no-map-gw \
       -T none -U none -I "$ifn" \
-      ${dev:+--interface "$dev"} -a "$cip" -n "$prefix" $gwflag \
+      ${dev:+--interface "$dev"} ${cip4:+-a "$cip4"} ${prefix4:+-n "$prefix4"} $gwflag4 \
+      ${cip6:+-a "$cip6"} $gwflag6 \
       "$@" --netns "$nsf" >> "$log" 2>&1 9>&- &
     pp=$!
     sleep 1
@@ -327,14 +375,40 @@ fixns_unit() { # $1=net
   nsenter --net="$nsf" ip link set lo up 2>/dev/null
   nsenter --net="$nsf" ip link set "$ifn" address "$smac" 2>/dev/null
   if [ "$noroute" = 1 ]; then
-    nsenter --net="$nsf" ip route show dev "$ifn" 2>/dev/null | grep -v "src $cip" | while read -r r; do
-      [ -n "$r" ] && nsenter --net="$nsf" ip route del $r 2>/dev/null
-    done
+    if [ -n "$cip4" ]; then
+      # drop all v4 routes except the container's own connected route
+      nsenter --net="$nsf" ip route show dev "$ifn" 2>/dev/null | grep -v "src $cip4" | while read -r r; do
+        [ -n "$r" ] && nsenter --net="$nsf" ip route del $r 2>/dev/null
+      done
+    else
+      # no v4 on this net: template v4 addresses are useless off the primary
+      # network (flushing the addr also drops its connected route)
+      nsenter --net="$nsf" ip addr flush dev "$ifn" scope global 2>/dev/null
+    fi
+    if [ -n "$cip6" ]; then
+      # keep the connected v6 subnet route: in-net connectivity, and the
+      # policy-routing table entry needs the gateway to be reachable
+      nsenter --net="$nsf" ip -6 route show dev "$ifn" 2>/dev/null | grep "default" | while read -r r; do
+        [ -n "$r" ] && nsenter --net="$nsf" ip -6 route del $r 2>/dev/null
+      done
+    else
+      nsenter --net="$nsf" ip -6 addr flush dev "$ifn" scope global 2>/dev/null
+      nsenter --net="$nsf" ip -6 route show dev "$ifn" 2>/dev/null | grep -v "fe80:" | while read -r r; do
+        [ -n "$r" ] && nsenter --net="$nsf" ip -6 route del $r 2>/dev/null
+      done
+    fi
   fi
   if [ -n "$tid" ]; then
-    nsenter --net="$nsf" ip rule 2>/dev/null | grep -q "from $cip" || \
-      nsenter --net="$nsf" ip rule add from "$cip" table "$tid" 2>/dev/null
-    nsenter --net="$nsf" ip route add default via "$gw" dev "$ifn" table "$tid" 2>/dev/null
+    if [ -n "$cip4" ]; then
+      nsenter --net="$nsf" ip rule 2>/dev/null | grep -q "from $cip4" || \
+        nsenter --net="$nsf" ip rule add from "$cip4" table "$tid" 2>/dev/null
+      nsenter --net="$nsf" ip route add default via "$gw4" dev "$ifn" table "$tid" 2>/dev/null
+    fi
+    if [ -n "$cip6" ]; then
+      nsenter --net="$nsf" ip -6 rule 2>/dev/null | grep -q "from $cip6" || \
+        nsenter --net="$nsf" ip -6 rule add from "$cip6" table "$tid" 2>/dev/null
+      nsenter --net="$nsf" ip -6 route add default via "$gw6" dev "$ifn" table "$tid" 2>/dev/null
+    fi
   fi
 }
 
@@ -349,6 +423,10 @@ done
 while :; do
   sleep 5
   [ -f "$STATE/$cid.ip" ] || { rm -f "$STATE/lock-$cid"; exit 0; }
+  # follow container restarts: a restart rewrites state with a new netns
+  # while this supervisor (flock holder) may survive the teardown gap;
+  # re-read the netns so pasta is (re)launched against the current one
+  [ -f "$STATE/$cid.nsf" ] && nsf=$(cat "$STATE/$cid.nsf" 2>/dev/null)
   # iterate unit files (not pastapid files): teardown wipes pastapids, and
   # on a network reload the surviving supervisor must revive pasta from scratch
   for u in "$STATE/$cid.unit".*; do

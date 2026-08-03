@@ -137,6 +137,18 @@ if [ "$cmd" = teardown ]; then
         lo_alias_del "$gw"
       done
       rm -f "$f"
+      # no record files left anywhere: stop aardvark instead of leaving it
+      # bound to dead gateway addresses
+      left=
+      for rf in "$aavark_dir"/*; do
+        [ -f "$rf" ] || continue
+        case ${rf##*/} in aardvark.pid) continue;; esac
+        left=1; break
+      done
+      if [ -z "$left" ]; then
+        apid=$(cat "$aavark_dir/aardvark.pid" 2>/dev/null)
+        [ -n "$apid" ] && kill "$apid" 2>/dev/null && rm -f "$aavark_dir/aardvark.pid"
+      fi
     fi
     aavark_notify
   done
@@ -148,7 +160,11 @@ if [ "$cmd" = teardown ]; then
   aliases=$(cat "$STATE/$cid.ip" 2>/dev/null)
   # remove state first: the launch.sh supervisor polls for it and exits
   rm -f "$STATE/$cid".*
-  for pp in $pids; do kill "$pp" 2>/dev/null; done
+  # /tmp survives reboots here: stale pastapids may belong to reused PIDs,
+  # only kill processes that actually are pasta
+  for pp in $pids; do
+    case $(tr '\0' ' ' < "/proc/$pp/cmdline" 2>/dev/null) in *pasta*) kill "$pp" 2>/dev/null;; esac
+  done
   for a in $aliases; do
     lo_alias_del "$a"
   done
@@ -254,10 +270,17 @@ for net in $nets; do
     [ "$internal" = "true" ] || tid=$((100+first))
   fi
 
-  # host-side aliases: container IPs (direct access) and gateways (DNS target)
-  for a in "$cip4" "$cip6" "$gw4" "$gw6"; do
+  # host-side aliases: container IPs (direct access) always; gateways only
+  # when aardvark DNS needs a bind target (teardown removes them under the
+  # same condition)
+  for a in "$cip4" "$cip6"; do
     [ -n "$a" ] && lo_alias_add "$a"
   done
+  if [ "$dns_enabled" = "true" ]; then
+    for a in "$gw4" "$gw6"; do
+      [ -n "$a" ] && lo_alias_add "$a"
+    done
+  fi
   [ -n "$cip4" ] && printf '%s\n' "$cip4" >> "$STATE/$cid.ip"
   [ -n "$cip6" ] && printf '%s\n' "$cip6" >> "$STATE/$cid.ip"
 

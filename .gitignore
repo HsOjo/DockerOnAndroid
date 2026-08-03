@@ -1,5 +1,6 @@
 .DS_Store
 /passt-src/
 /rootfs/usr/local/bin/pasta
+/config.env
 *.log
 *.tmp

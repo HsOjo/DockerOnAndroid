@@ -1,8 +1,15 @@
 #!/bin/sh
-# install.sh: deploy the DockerOnAndroid pasta stack from ./rootfs into /.
-# Run ON the device (copy this repo onto it first, any way you like).
+# install.sh: deploy the DockerOnAndroid stack per ./configure's config.env.
+# Reconciles existing state: wraps only the binaries this config needs and
+# restores *.real for ones it no longer does (route switches just work).
 set -e
 cd "$(dirname "$0")"
+
+[ -f config.env ] || { echo "error: config.env missing; run ./configure first" >&2; exit 1; }
+# shellcheck source=/dev/null
+. ./config.env
+
+MANIFEST=/etc/dockeronandroid.manifest
 
 if [ -d /usr/libexec/podman ]; then LIBEXEC=/usr/libexec/podman
 elif [ -d /usr/lib/podman ]; then LIBEXEC=/usr/lib/podman
@@ -11,40 +18,125 @@ fi
 
 is_wrapper() { grep -q DockerOnAndroid "$1" 2>/dev/null; }
 
-# back up pristine binaries (first install only); never treat a wrapper as
-# pristine, and refuse to reinstall over a wrapper whose backup is missing
-for b in /usr/bin/podman /usr/bin/conmon "$LIBEXEC/netavark"; do
-  if [ -f "$b.real" ]; then
-    if is_wrapper "$b.real"; then
-      echo "error: $b.real is itself a DoA wrapper; restore pristine binaries first" >&2; exit 1
-    fi
-  elif is_wrapper "$b"; then
-    echo "error: $b is already a DoA wrapper but $b.real is missing; cannot recover the pristine binary" >&2; exit 1
-  else
-    cp "$b" "$b.real"
+pkg_install() {
+  if command -v apk >/dev/null 2>&1; then apk add "$@"
+  elif command -v apt-get >/dev/null 2>&1; then apt-get update && apt-get install -y "$@"
+  elif command -v dnf >/dev/null 2>&1; then dnf install -y "$@"
+  elif command -v pacman >/dev/null 2>&1; then pacman -Sy --noconfirm "$@"
+  else echo "error: no supported package manager (apk/apt-get/dnf/pacman)" >&2; exit 1
   fi
-done
+}
 
-FILES="usr/bin/podman
-usr/local/bin/pasta
-usr/local/bin/crun-nomq
-usr/local/lib/crun-nomq.jq
-usr/bin/conmon
-etc/network/interfaces
-etc/containers/containers.conf
-etc/containers/storage.conf"
+if [ "$NEED_JQ" = 1 ] && ! command -v jq >/dev/null 2>&1; then
+  echo "> installing jq (required by the netavark shim / crun-nomq)"
+  pkg_install jq
+fi
 
-for f in $FILES; do
-  [ -f "rootfs/$f" ] || { echo "missing rootfs/$f (run ./build-pasta.sh first if it's pasta)" >&2; exit 1; }
-  echo "> $f"
-  mkdir -p "$(dirname "/$f")"
-  # sidestep ETXTBSY on running binaries: copy aside, then atomic rename
-  cp "rootfs/$f" /.doa-install.tmp
-  mv /.doa-install.tmp "/$f"
-done
-echo "> $LIBEXEC/netavark"
-cp rootfs/usr/libexec/podman/netavark /.doa-install.tmp
-mv /.doa-install.tmp "$LIBEXEC/netavark"
+# wrap binaries this config needs; restore ones it doesn't (pristine > wrapper)
+WRAPPED=""
+reconcile() {
+  b=$1 want=$2 src=$3
+  if [ "$want" = 1 ]; then
+    if [ -f "$b.real" ]; then
+      if is_wrapper "$b.real"; then
+        echo "error: $b.real is itself a DoA wrapper; restore pristine binaries first" >&2; exit 1
+      fi
+    elif is_wrapper "$b"; then
+      : # already wrapped, backup in place
+    else
+      cp "$b" "$b.real"
+    fi
+    install_file "$src" "$b"
+    chmod 755 "$b"
+    WRAPPED="$WRAPPED $b"
+  elif is_wrapper "$b" && [ -f "$b.real" ]; then
+    echo "< restore $b (no longer wrapped)"
+    mv -f "$b.real" "$b"
+  fi
+}
 
-chmod 755 /usr/bin/podman /usr/local/bin/pasta /usr/local/bin/crun-nomq "$LIBEXEC/netavark" /usr/bin/conmon
-echo "done. check: podman ps"
+# sidestep ETXTBSY on running binaries: copy aside, then atomic rename
+install_file() {
+  echo "> $2"
+  cp "$1" /.doa-install.tmp
+  mv /.doa-install.tmp "$2"
+}
+
+FILES=""
+reconcile /usr/bin/podman "$PODMAN_WRAPPER" rootfs/usr/bin/podman
+if [ "$NET_ROUTE" = pasta ]; then
+  [ -f rootfs/usr/local/bin/pasta ] || { echo "error: rootfs/usr/local/bin/pasta missing; run ./build-pasta.sh" >&2; exit 1; }
+  reconcile /usr/bin/conmon 1 rootfs/usr/bin/conmon
+  reconcile "$LIBEXEC/netavark" 1 rootfs/usr/libexec/podman/netavark
+  install_file rootfs/usr/local/bin/pasta /usr/local/bin/pasta
+  chmod 755 /usr/local/bin/pasta
+  FILES="$FILES /usr/local/bin/pasta"
+else
+  reconcile /usr/bin/conmon 0 ""
+  reconcile "$LIBEXEC/netavark" 0 ""
+  if [ -f /usr/local/bin/pasta ]; then echo "< remove /usr/local/bin/pasta (native route)"; rm -f /usr/local/bin/pasta; fi
+  rm -rf /tmp/pasta
+fi
+
+if [ "$CRUN_NOMQ" = 1 ]; then
+  install_file rootfs/usr/local/bin/crun-nomq /usr/local/bin/crun-nomq
+  install_file rootfs/usr/local/lib/crun-nomq.jq /usr/local/lib/crun-nomq.jq
+  chmod 755 /usr/local/bin/crun-nomq
+  FILES="$FILES /usr/local/bin/crun-nomq /usr/local/lib/crun-nomq.jq"
+else
+  rm -f /usr/local/bin/crun-nomq /usr/local/lib/crun-nomq.jq
+fi
+
+# netavark execs "iptables"; when only the legacy backend works on this
+# kernel (no NF_TABLES), give it a working one ahead of /usr/sbin in PATH
+if [ "$IPTABLES_LEGACY_SHIM" = 1 ] && [ "$NET_ROUTE" = native ]; then
+  echo "> /usr/local/bin/iptables -> $IPTABLES_LEGACY_BIN"
+  mkdir -p /usr/local/bin
+  ln -sf "$IPTABLES_LEGACY_BIN" /usr/local/bin/iptables
+  FILES="$FILES /usr/local/bin/iptables"
+else
+  rm -f /usr/local/bin/iptables
+fi
+
+if [ "$LO_FIX" = 1 ]; then
+  install_file rootfs/etc/network/interfaces /etc/network/interfaces
+  FILES="$FILES /etc/network/interfaces"
+fi
+
+# back up a pre-existing non-DoA config once before overwriting it
+backup_conf() {
+  if [ -f "$1" ] && ! grep -q DockerOnAndroid "$1" 2>/dev/null && [ ! -f "$1.doa-bak" ]; then
+    cp "$1" "$1.doa-bak"
+  fi
+}
+
+# generate configs from the rootfs templates per probe results
+RUNTIME=crun
+[ "$CRUN_NOMQ" = 1 ] && RUNTIME=/usr/local/bin/crun-nomq
+backup_conf /etc/containers/containers.conf
+{ echo "# DockerOnAndroid: generated by install.sh from config.env"
+  sed -e "s/^ipcns = .*/ipcns = \"$IPCNS\"/" \
+      -e "s/^pidns = .*/pidns = \"$PIDNS\"/" \
+      -e "s|^runtime = .*|runtime = \"$RUNTIME\"|" \
+      rootfs/etc/containers/containers.conf; } > /.doa-conf.tmp
+if [ "$NET_ROUTE" = native ]; then
+  sed -i "s/^#firewall_driver = \"\"/firewall_driver = \"$FW_DRIVER\"/" /.doa-conf.tmp
+fi
+echo "> etc/containers/containers.conf (runtime=$RUNTIME ipcns=$IPCNS pidns=$PIDNS$([ "$NET_ROUTE" = native ] && echo " fw=$FW_DRIVER"))"
+mv /.doa-conf.tmp /etc/containers/containers.conf
+
+backup_conf /etc/containers/storage.conf
+{ echo "# DockerOnAndroid: generated by install.sh from config.env"
+  sed "s/^driver = .*/driver = \"$STORAGE_DRIVER\"/" rootfs/etc/containers/storage.conf; } > /.doa-conf.tmp
+echo "> etc/containers/storage.conf (driver=$STORAGE_DRIVER)"
+mv /.doa-conf.tmp /etc/containers/storage.conf
+FILES="$FILES /etc/containers/containers.conf /etc/containers/storage.conf"
+
+{ echo "WRAPPED=\"${WRAPPED# }\""; echo "FILES=\"${FILES# }\""; } > "$MANIFEST"
+echo "> manifest: $MANIFEST"
+
+have=$(podman info --format '{{.Store.GraphDriverName}}' 2>/dev/null || true)
+if [ -n "$have" ] && [ "$have" != "$STORAGE_DRIVER" ]; then
+  echo "warn: storage DB still uses \"$have\"; wipe /var/lib/containers/storage to switch to $STORAGE_DRIVER" >&2
+fi
+echo "done (route=$NET_ROUTE). check: podman ps"

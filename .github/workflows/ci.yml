@@ -11,7 +11,7 @@ jobs:
       - name: syntax check (sh -n)
         run: |
           set -e
-          for f in install.sh build-pasta.sh uninstall.sh \
+          for f in configure install.sh build-pasta.sh uninstall.sh \
                    rootfs/usr/bin/podman rootfs/usr/bin/conmon \
                    rootfs/usr/libexec/podman/netavark \
                    rootfs/usr/local/bin/crun-nomq; do
@@ -23,7 +23,7 @@ jobs:
         run: |
           sudo apt-get install -y shellcheck
           shellcheck -s sh \
-            install.sh build-pasta.sh uninstall.sh \
+            configure install.sh build-pasta.sh uninstall.sh \
             rootfs/usr/bin/podman rootfs/usr/bin/conmon \
             rootfs/usr/libexec/podman/netavark \
             rootfs/usr/local/bin/crun-nomq

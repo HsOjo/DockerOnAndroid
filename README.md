@@ -81,9 +81,12 @@ When creating a container, podman **actively binds + LISTENs on every published 
 Copy this repo onto the device however you like (ssh / adb / ...), then **run on the device**:
 
 ```sh
-./build-pasta.sh      # first time: build pasta (see below), outputs rootfs/usr/local/bin/pasta (binary not tracked)
-./install.sh          # installs ./rootfs into /; backs up podman/conmon/netavark as *.real on first install
+./configure           # probe the kernel empirically, write config.env (FORCE_PASTA=1 to force the shim route)
+./build-pasta.sh      # only if configure picked the pasta route and no binary is present yet
+./install.sh          # installs per config.env; backs up podman/conmon/netavark as *.real and pre-existing configs as *.doa-bak
 ```
+
+`configure` decides per device: kernels with veth + bridge + a working firewall (iptables or nftables) get netavark's **native bridge** with no shim at all; weaker kernels get the **pasta shim stack**; `crun-nomq` (no IPC_NS), the podman wrapper (no USER_NS) and the storage driver (overlayfs vs vfs) are each enabled only when needed. Re-running `configure` + `install.sh` reconciles the system — wrappers no longer needed are restored from `*.real`.
 
 Verify on the device:
 

@@ -1,16 +1,26 @@
 #!/bin/sh
-# uninstall.sh: restore pristine podman/conmon/netavark and remove DoA state.
-# Run ON the device. Bridge-network containers lose networking afterwards; stop them first.
+# uninstall.sh: restore pristine binaries and remove everything install.sh
+# deployed, per /etc/dockeronandroid.manifest. Run ON the device.
+# Bridge-network containers lose networking afterwards; stop them first.
 set -e
 
-NV=
-for d in /usr/libexec/podman /usr/lib/podman; do
-  [ -f "$d/netavark.real" ] && NV=$d/netavark
-done
+MANIFEST=/etc/dockeronandroid.manifest
+WRAPPED="" FILES=""
+# shellcheck source=/dev/null
+[ -f "$MANIFEST" ] && . "$MANIFEST"
 
 is_wrapper() { grep -q DockerOnAndroid "$1" 2>/dev/null; }
 
-for b in /usr/bin/podman /usr/bin/conmon $NV; do
+if [ -z "$WRAPPED" ]; then
+  # pre-manifest install: fall back to probing for *.real backups
+  for d in /usr/libexec/podman /usr/lib/podman; do
+    [ -f "$d/netavark.real" ] && WRAPPED="$WRAPPED $d/netavark"
+  done
+  [ -f /usr/bin/podman.real ] && WRAPPED="$WRAPPED /usr/bin/podman"
+  [ -f /usr/bin/conmon.real ] && WRAPPED="$WRAPPED /usr/bin/conmon"
+fi
+
+for b in $WRAPPED; do
   [ -f "$b.real" ] || continue
   if is_wrapper "$b.real"; then
     echo "warn: $b.real is itself a DoA wrapper, skipping restore" >&2
@@ -18,5 +28,19 @@ for b in /usr/bin/podman /usr/bin/conmon $NV; do
   fi
   mv -f "$b.real" "$b"
 done
+
+if [ -z "$FILES" ]; then
+  FILES="/usr/local/bin/pasta /usr/local/bin/crun-nomq /usr/local/lib/crun-nomq.jq /usr/local/bin/iptables"
+fi
+for f in $FILES; do
+  case $f in
+    /etc/containers/*)
+      if [ -f "$f.doa-bak" ]; then mv -f "$f.doa-bak" "$f"; else rm -f "$f"; fi
+      ;;
+    *) rm -f "$f" ;;
+  esac
+done
+
+rm -f "$MANIFEST"
 rm -rf /tmp/pasta /tmp/nv-shim.log /tmp/nv-aardvark.log
-echo "done: pristine binaries restored, pasta state removed"
+echo "done: pristine state restored"

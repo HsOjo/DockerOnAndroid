@@ -1,7 +1,7 @@
 #!/bin/sh
-# install.sh: deploy the DockerOnAndroid stack per ./configure's config.env.
-# Reconciles existing state: wraps only the binaries this config needs and
-# restores *.real for ones it no longer does (route switches just work).
+# install.sh: deploy the DockerOnAndroid pasta stack per ./configure's
+# config.env. Reconciles existing state: wraps podman only when this config
+# needs it, restores *.real otherwise (configure changes just work).
 set -e
 cd "$(dirname "$0")"
 
@@ -27,7 +27,7 @@ pkg_install() {
   fi
 }
 
-if [ "$NEED_JQ" = 1 ] && ! command -v jq >/dev/null 2>&1; then
+if ! command -v jq >/dev/null 2>&1; then
   echo "> installing jq (required by the netavark shim / crun-nomq)"
   pkg_install jq
 fi
@@ -63,20 +63,13 @@ install_file() {
 }
 
 FILES=""
+[ -f rootfs/usr/local/bin/pasta ] || { echo "error: rootfs/usr/local/bin/pasta missing; run ./build-pasta.sh" >&2; exit 1; }
 reconcile /usr/bin/podman "$PODMAN_WRAPPER" rootfs/usr/bin/podman
-if [ "$NET_ROUTE" = pasta ]; then
-  [ -f rootfs/usr/local/bin/pasta ] || { echo "error: rootfs/usr/local/bin/pasta missing; run ./build-pasta.sh" >&2; exit 1; }
-  reconcile /usr/bin/conmon 1 rootfs/usr/bin/conmon
-  reconcile "$LIBEXEC/netavark" 1 rootfs/usr/libexec/podman/netavark
-  install_file rootfs/usr/local/bin/pasta /usr/local/bin/pasta
-  chmod 755 /usr/local/bin/pasta
-  FILES="$FILES /usr/local/bin/pasta"
-else
-  reconcile /usr/bin/conmon 0 ""
-  reconcile "$LIBEXEC/netavark" 0 ""
-  if [ -f /usr/local/bin/pasta ]; then echo "< remove /usr/local/bin/pasta (native route)"; rm -f /usr/local/bin/pasta; fi
-  rm -rf /tmp/pasta
-fi
+reconcile /usr/bin/conmon 1 rootfs/usr/bin/conmon
+reconcile "$LIBEXEC/netavark" 1 rootfs/usr/libexec/podman/netavark
+install_file rootfs/usr/local/bin/pasta /usr/local/bin/pasta
+chmod 755 /usr/local/bin/pasta
+FILES="$FILES /usr/local/bin/pasta"
 
 if [ "$CRUN_NOMQ" = 1 ]; then
   install_file rootfs/usr/local/bin/crun-nomq /usr/local/bin/crun-nomq
@@ -85,17 +78,6 @@ if [ "$CRUN_NOMQ" = 1 ]; then
   FILES="$FILES /usr/local/bin/crun-nomq /usr/local/lib/crun-nomq.jq"
 else
   rm -f /usr/local/bin/crun-nomq /usr/local/lib/crun-nomq.jq
-fi
-
-# netavark execs "iptables"; when only the legacy backend works on this
-# kernel (no NF_TABLES), give it a working one ahead of /usr/sbin in PATH
-if [ "$IPTABLES_LEGACY_SHIM" = 1 ] && [ "$NET_ROUTE" = native ]; then
-  echo "> /usr/local/bin/iptables -> $IPTABLES_LEGACY_BIN"
-  mkdir -p /usr/local/bin
-  ln -sf "$IPTABLES_LEGACY_BIN" /usr/local/bin/iptables
-  FILES="$FILES /usr/local/bin/iptables"
-else
-  rm -f /usr/local/bin/iptables
 fi
 
 if [ "$LO_FIX" = 1 ]; then
@@ -119,10 +101,7 @@ backup_conf /etc/containers/containers.conf
       -e "s/^pidns = .*/pidns = \"$PIDNS\"/" \
       -e "s|^runtime = .*|runtime = \"$RUNTIME\"|" \
       rootfs/etc/containers/containers.conf; } > /.doa-conf.tmp
-if [ "$NET_ROUTE" = native ]; then
-  sed -i "s/^#firewall_driver = \"\"/firewall_driver = \"$FW_DRIVER\"/" /.doa-conf.tmp
-fi
-echo "> etc/containers/containers.conf (runtime=$RUNTIME ipcns=$IPCNS pidns=$PIDNS$([ "$NET_ROUTE" = native ] && echo " fw=$FW_DRIVER"))"
+echo "> etc/containers/containers.conf (runtime=$RUNTIME ipcns=$IPCNS pidns=$PIDNS)"
 mv /.doa-conf.tmp /etc/containers/containers.conf
 
 backup_conf /etc/containers/storage.conf
@@ -139,4 +118,4 @@ have=$(podman info --format '{{.Store.GraphDriverName}}' 2>/dev/null || true)
 if [ -n "$have" ] && [ "$have" != "$STORAGE_DRIVER" ]; then
   echo "warn: storage DB still uses \"$have\"; wipe /var/lib/containers/storage to switch to $STORAGE_DRIVER" >&2
 fi
-echo "done (route=$NET_ROUTE). check: podman ps"
+echo "done. check: podman ps"

@@ -30,7 +30,7 @@ for b in $WRAPPED; do
 done
 
 if [ -z "$FILES" ]; then
-  FILES="/usr/local/bin/pasta /usr/local/bin/crun-nomq /usr/local/lib/crun-nomq.jq /usr/local/bin/iptables"
+  FILES="/usr/local/bin/pasta /usr/local/bin/crun-nomq /usr/local/lib/crun-nomq.jq"
 fi
 for f in $FILES; do
   case $f in

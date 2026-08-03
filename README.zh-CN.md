@@ -78,12 +78,12 @@ podman 创建容器时会**主动 bind + LISTEN 每一个发布端口并持有 f
 用任意方式（ssh / adb / ...）把本仓库拷到设备上，然后**在设备上执行**：
 
 ```sh
-./configure           # 实测内核能力, 生成 config.env (FORCE_PASTA=1 可强制 shim 路线)
-./build-pasta.sh      # 仅当 configure 选了 pasta 路线且尚无二进制时执行
+./configure           # 实测内核能力, 生成 config.env
+./build-pasta.sh      # 首次: 构建 pasta (见下节), 产出 rootfs/usr/local/bin/pasta (二进制不入库)
 ./install.sh          # 按 config.env 安装; podman/conmon/netavark 备份为 *.real, 已有配置备份为 *.doa-bak
 ```
 
-`configure` 按设备决策：具备 veth + bridge + 可用防火墙（iptables 或 nftables）的内核走 netavark **原生 bridge**，完全不装 shim；较弱的内核走 **pasta shim 栈**；`crun-nomq`（无 IPC_NS）、podman wrapper（无 USER_NS）、存储驱动（overlayfs 或 vfs）均按需启用。重跑 `configure` + `install.sh` 会自动对账——不再需要的 wrapper 会从 `*.real` 恢复。
+`configure` 按设备裁剪安装项：`crun-nomq`（无 IPC_NS）、podman wrapper（无 USER_NS）、存储驱动（overlayfs 或 vfs）均按需启用。重跑 `configure` + `install.sh` 会自动对账——不再需要的 podman wrapper 会从 `*.real` 恢复。（netavark 原生 bridge 路线经评估后放弃：安卓内核常见 filter 表只读、xt match 裁剪，用户态无法绕开。）
 
 设备端验证：
 

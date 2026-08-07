@@ -548,11 +548,13 @@ chmod +x "$STATE/$cid.launch.sh"
 # without involving conmon, so nothing else will run the launch script; if the
 # netns is already occupied, start pasta ourselves (create flow leaves the
 # netns empty until crun joins it, so this never fires on container start).
+# One ls+grep for the whole /proc scan: a readlink per pid costs seconds on
+# Android-scale process counts
 nsino=$(stat -Lc %i "$nsf" 2>/dev/null || echo _)
 live=
-for pn in /proc/[0-9]*/ns/net; do
-  case $(readlink "$pn" 2>/dev/null) in "net:[$nsino]") live=1; break;; esac
-done
+case $(ls -l /proc/[0-9]*/ns/net 2>/dev/null | grep -m1 "net:\[$nsino\]") in
+  ?*) live=1;;
+esac
 if [ -n "$live" ] && [ -f "$STATE/$cid.launch.sh" ]; then
   log "setup $cid netns already live (network reload); self-launching pasta"
   mv "$STATE/$cid.launch.sh" "$STATE/$cid.launch.run"

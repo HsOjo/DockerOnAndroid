@@ -71,7 +71,7 @@ podman 创建容器时会**主动 bind + LISTEN 每一个发布端口并持有 f
 
 - 已 root 的 Android 设备（开发验证: Magisk 30.7, SELinux Permissive）
 - 一个 Linux 用户空间 — 发行版不限（开发验证: [LinuxOnAndroid](https://github.com/HsOjo/LinuxOnAndroid) musl/Alpine guest）；`build-pasta.sh` 通过 apk / apt / dnf / pacman 自动安装构建依赖，podman libexec 目录（`/usr/libexec/podman` 或 `/usr/lib/podman`）在安装时自动探测
-- podman **5.3.2** + netavark **1.13.1** + aardvark-dns（版本绑定，见下文）
+- podman **5.3.2** 或 **5.7.0** + netavark + aardvark-dns（见[兼容性](#兼容性)）
 - 内核含 `NET_NS` + `TUN`；设备能加载 tun
 
 ## 安装
@@ -103,6 +103,39 @@ podman rm -f web
 PROXY=http://<proxy>:<port> ./build-pasta.sh   # clone passt (固定 tag) -> 应用 patches/ -> make -> rootfs/
 ```
 
+## 兼容性
+
+已验证组合：
+
+| podman | netavark | 状态 |
+|---|---|---|
+| 5.3.2 | 1.13.1 | 已验证 |
+| 5.7.0 | 1.16.1 | 已验证（bridge 网络、端口发布、`network reload`、teardown） |
+
+shim 向 podman 自报为 netavark `1.13.1-pasta`，aardvark-dns 记录文件按 1.x 格式写入；上述两个 podman 版本均接受该接口。其他版本或许可用，但必须先通过下面的回归验证再投入生产。
+
+## 升级 podman
+
+包管理器升级（apk / apt / ...）会替换包属文件 `/usr/bin/podman`、`/usr/bin/conmon` 和 `<libexec>/netavark`，**静默覆盖 wrapper**——此后 bridge 网络的容器拿不到网络（setup 失败或 pasta 不会启动），而 host 网络的容器照常运行，问题不易察觉。`/usr/local`（pasta、crun-nomq）和 `/etc/containers` 不属于任何包，不受影响。
+
+升级后 `*.real` 里还是**旧版本**二进制，需先刷新备份再重装——否则 `install.sh` 会包装旧的 `.real`，等于降级：
+
+```sh
+cp /usr/bin/podman /usr/bin/podman.real
+cp /usr/bin/conmon /usr/bin/conmon.real
+cp /usr/libexec/podman/netavark /usr/libexec/podman/netavark.real   # Debian 系为 /usr/lib/podman
+./install.sh
+```
+
+然后在设备上跑完整回归套件：
+
+```sh
+./test.sh   # bridge TCP/UDP、出网、IPv6、多网络、internal、DNS、
+            # EXPOSE、pod、restart/stop/start、崩溃自愈、teardown
+```
+
+关于 podman **>= 5.5**：pod 的 infra 容器改用 rootfs-overlay（需要 overlayfs），在本内核上无法启动。`install.sh` 会在 containers.conf 里把 `infra_image` 固定到本地 `podman-pause` 镜像来绕开（走 vfs 镜像路径）。若没有 `localhost/podman-pause` 镜像会给出警告，需拉取或构建一个以继续使用 pod。
+
 ## 卸载
 
 ```sh
@@ -115,7 +148,7 @@ PROXY=http://<proxy>:<port> ./build-pasta.sh   # clone passt (固定 tag) -> 应
 - **非真 L2 隔离**：容器间隔离靠 IP 层 + 路由实现，不等价于 veth bridge 的二层隔离；主机防火墙亦不可用（内核无 netfilter）。
 - **internal 网络的 "无外网" 通过清刷容器路由表实现**，执意提权的容器可重新加回默认路由。
 - **EXPOSE 互联依赖异步 inspect**（容器启动后瞬时查询自身配置），极端时序下首条规则可能晚到数秒。
-- **版本绑定**：wrapper 依赖 podman 5.3.x 的 netavark 插件协议与 conmon 参数格式，升级 podman 需回归验证。
+- **版本绑定**：wrapper 依赖 podman 的 netavark 插件协议与 conmon 参数格式，仅[兼容性](#兼容性)中列出的版本经过验证。podman 包升级还会覆盖 wrapper——见[升级 podman](#升级-podman)。
 
 ## 目录结构
 
@@ -128,7 +161,7 @@ rootfs/
   usr/local/bin/crun-nomq     # crun wrapper: 剥离容器不支持的 cgroup 挂载
                               # (pasta 二进制由 build-pasta.sh 产出, 不入库)
   etc/containers/             # containers.conf / registries.conf 等
-install.sh  build-pasta.sh  uninstall.sh
+install.sh  build-pasta.sh  uninstall.sh  test.sh
 patches/passt/android-compat.patch
 ```
 

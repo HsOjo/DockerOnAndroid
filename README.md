@@ -74,7 +74,7 @@ When creating a container, podman **actively binds + LISTENs on every published 
 
 - A rooted Android device (validated on: Magisk 30.7, SELinux Permissive)
 - A Linux userland — any distro (validated on: [LinuxOnAndroid](https://github.com/HsOjo/LinuxOnAndroid) musl/Alpine guest); `build-pasta.sh` installs build deps via apk / apt / dnf / pacman, and the podman libexec dir (`/usr/libexec/podman` vs `/usr/lib/podman`) is auto-detected at install time
-- podman **5.3.2** + netavark **1.13.1** + aardvark-dns (version-pinned, see below)
+- podman **5.3.2** or **5.7.0** + netavark + aardvark-dns (see [Compatibility](#compatibility))
 - Kernel with `NET_NS` + `TUN`; device can load tun
 
 ## Install
@@ -106,6 +106,39 @@ Runs on the device; set `PROXY` if it needs one to reach the internet:
 PROXY=http://<proxy>:<port> ./build-pasta.sh   # clone passt (pinned tag) -> apply patches/ -> make -> rootfs/
 ```
 
+## Compatibility
+
+Validated combinations:
+
+| podman | netavark | status |
+|---|---|---|
+| 5.3.2 | 1.13.1 | validated |
+| 5.7.0 | 1.16.1 | validated (bridge networking, port publishing, `network reload`, teardown) |
+
+The shim reports itself to podman as netavark `1.13.1-pasta` and writes aardvark-dns record files in the 1.x format; both podman versions above accept that interface. Other versions may work but must pass the regression check below before production use.
+
+## Upgrading podman
+
+Package upgrades (apk / apt / ...) replace the package-owned files `/usr/bin/podman`, `/usr/bin/conmon` and `<libexec>/netavark`, **silently discarding the wrappers** — bridge-network containers then get no networking (setup fails or pasta never launches), while host-network containers keep running and hide the breakage. Files under `/usr/local` (pasta, crun-nomq) and `/etc/containers` are not package-owned and survive.
+
+After an upgrade, `*.real` still hold the **old** binaries. Refresh the backups first — otherwise `install.sh` would wrap the stale `.real` and downgrade you:
+
+```sh
+cp /usr/bin/podman /usr/bin/podman.real
+cp /usr/bin/conmon /usr/bin/conmon.real
+cp /usr/libexec/podman/netavark /usr/libexec/podman/netavark.real   # or /usr/lib/podman
+./install.sh
+```
+
+Then run the full regression suite on the device:
+
+```sh
+./test.sh   # bridge TCP/UDP, outbound, IPv6, multi-net, internal, DNS,
+            # EXPOSE, pods, restart/stop/start, crash recovery, teardown
+```
+
+Note on podman **>= 5.5**: pod infra containers switched to rootfs-overlay, which needs overlayfs — pods fail to start on this kernel. `install.sh` works around it by pinning `infra_image` in containers.conf to the local `podman-pause` image (image path = vfs). Without any `localhost/podman-pause` image it warns; pull or build one to keep pods working.
+
 ## Uninstall
 
 ```sh
@@ -118,7 +151,7 @@ PROXY=http://<proxy>:<port> ./build-pasta.sh   # clone passt (pinned tag) -> app
 - **Not true L2 isolation**: inter-container isolation is implemented at the IP layer + routing, not equivalent to veth-bridge layer-2 isolation; host firewall is also unavailable (no netfilter in kernel).
 - **"No outbound" on internal networks is enforced by flushing the container's route table** — a determined privileged container can add a default route back.
 - **EXPOSE connectivity relies on an asynchronous inspect** (querying the container's own config right after start); under extreme timing the first rule may arrive seconds late.
-- **Version-pinned**: the wrappers depend on podman 5.3.x's netavark plugin protocol and conmon argument format; upgrading podman requires regression testing.
+- **Version-bound**: the wrappers depend on podman's netavark plugin protocol and conmon argument format; only the versions listed under [Compatibility](#compatibility) are validated. A podman package upgrade also overwrites the wrappers — see [Upgrading podman](#upgrading-podman).
 
 ## Layout
 
@@ -131,7 +164,7 @@ rootfs/
   usr/local/bin/crun-nomq     # crun wrapper: strips unsupported cgroup mounts
                               # (pasta binary produced by build-pasta.sh, not tracked)
   etc/containers/             # containers.conf / registries.conf etc.
-install.sh  build-pasta.sh  uninstall.sh
+install.sh  build-pasta.sh  uninstall.sh  test.sh
 patches/passt/android-compat.patch
 ```
 

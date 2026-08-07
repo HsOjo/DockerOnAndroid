@@ -3,10 +3,12 @@
 # 1. close podman's published-port reservation sockets (inherited LISTEN
 #    fds) so per-container pasta can bind them
 # 2. hand off to the netavark shim's launch script, which needs exactly
-#    those ports
-# 3. hold container start until the launch script signals $cid.ready (netns
-#    configured); the timeout keeps a pasta failure non-fatal - the container
-#    then just starts without networking, as before
+#    those ports. No gating here: podman keeps its own reservation copies
+#    until the container starts, so pasta can only bind in the background
+#    (start_unit retries) while we exec conmon immediately.
+# 3. when the shim already early-launched (no published ports: launch.sh is
+#    gone, launch.run is present), gate container start on $cid.ready - the
+#    netns is guaranteed configured before the entrypoint runs.
 STATE=/tmp/pasta/nv
 
 inodes=$(awk '$4=="0A"{print $10}' /proc/net/tcp /proc/net/tcp6 2>/dev/null
@@ -18,9 +20,12 @@ if [ -n "$inodes" ]; then
     case $link in
       socket:\[*\])
         ino=${link#socket:\[}; ino=${ino%\]}
+        # close without a stderr guard: with many inherited sockets the
+        # target fd can collide with the fd ash uses to save stderr for
+        # 2>/dev/null, and closing that one mid-redirect wedges busybox
+        # ash in an infinite dup2 error loop
         if printf '%s\n' "$inodes" | grep -qx "$ino"; then
-          eval "exec $fd<&-" 2>/dev/null
-          eval "exec $fd>&-" 2>/dev/null
+          [ -e "/proc/self/fd/$fd" ] && eval "exec $fd>&-"
         fi
         ;;
     esac
@@ -34,13 +39,18 @@ for a in "$@"; do
   prev=$a
 done
 case $cid in *[!0-9a-f]* | "") cid= ;; esac
-if [ -n "$cid" ] && [ -f "$STATE/$cid.launch.sh" ]; then
-  mv "$STATE/$cid.launch.sh" "$STATE/$cid.launch.run"
-  setsid sh "$STATE/$cid.launch.run" </dev/null >/dev/null 2>&1 &
-  i=0
-  while [ "$i" -lt 200 ] && [ ! -f "$STATE/$cid.ready" ]; do
-    sleep 0.05; i=$((i+1))
-  done
+if [ -n "$cid" ]; then
+  if [ -f "$STATE/$cid.launch.sh" ]; then
+    mv "$STATE/$cid.launch.sh" "$STATE/$cid.launch.run"
+    setsid sh "$STATE/$cid.launch.run" </dev/null >/dev/null 2>&1 &
+  elif [ -f "$STATE/$cid.launch.run" ]; then
+    # shim early-launched: gate on readiness (timeout keeps a pasta
+    # failure non-fatal - the container then starts without networking)
+    i=0
+    while [ "$i" -lt 200 ] && [ ! -f "$STATE/$cid.ready" ]; do
+      sleep 0.05; i=$((i+1))
+    done
+  fi
 fi
 
 exec /usr/bin/conmon.real "$@"

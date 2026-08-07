@@ -148,6 +148,7 @@ cp /usr/libexec/podman/netavark /usr/libexec/podman/netavark.real   # Debian 系
 - **非真 L2 隔离**：容器间隔离靠 IP 层 + 路由实现，不等价于 veth bridge 的二层隔离；主机防火墙亦不可用（内核无 netfilter）。
 - **internal 网络的 "无外网" 通过清刷容器路由表实现**，执意提权的容器可重新加回默认路由。
 - **EXPOSE 互联依赖异步 inspect**（容器启动后瞬时查询自身配置），极端时序下首条规则可能晚到数秒。
+- **有发布端口的容器存在启动用网竞态**：podman 持有端口预留直到容器启动，pasta 只能在后台重试绑定——entrypoint 启动即用网可能赶上亚秒级窗口。无发布端口的容器由 conmon 就绪门控保证，不受影响。
 - **版本绑定**：wrapper 依赖 podman 的 netavark 插件协议与 conmon 参数格式，仅[兼容性](#兼容性)中列出的版本经过验证。podman 包升级还会覆盖 wrapper——见[升级 podman](#升级-podman)。
 
 ## 目录结构

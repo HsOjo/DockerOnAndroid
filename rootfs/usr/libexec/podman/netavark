@@ -413,7 +413,15 @@ start_unit() { # $1=net
       ${cip6:+-a "$cip6"} $gwflag6 \
       "$@" --netns "$nsf" >> "$log" 2>&1 9>&- &
     pp=$!
-    sleep 1
+    # poll instead of a fixed grace second: pasta exits within milliseconds
+    # on config errors, and ~0.3s alive is proof enough (the supervise loop
+    # covers late crashes anyway)
+    j=0
+    while [ "$j" -lt 6 ]; do
+      sleep 0.05
+      kill -0 "$pp" 2>/dev/null || break
+      j=$((j+1))
+    done
     if kill -0 "$pp" 2>/dev/null; then
       echo "$pp" > "$STATE/$cid.pastapid.$un"
       return 0
@@ -426,9 +434,9 @@ start_unit() { # $1=net
 fixns_unit() { # $1=net
   . "$STATE/$cid.unit.$1"
   i=0
-  while [ "$i" -lt 40 ]; do
+  while [ "$i" -lt 100 ]; do
     nsenter --net="$nsf" ip link show "$ifn" >/dev/null 2>&1 && break
-    i=$((i+1)); sleep 0.25
+    i=$((i+1)); sleep 0.05
   done
   nsenter --net="$nsf" ip link set lo up 2>/dev/null
   nsenter --net="$nsf" ip link set "$ifn" address "$smac" 2>/dev/null
@@ -544,10 +552,15 @@ done
 LAUNCH_EOF
 chmod +x "$STATE/$cid.launch.sh"
 
-# network reload path: podman reloads by teardown+setup on a *live* container
-# without involving conmon, so nothing else will run the launch script; if the
-# netns is already occupied, start pasta ourselves (create flow leaves the
-# netns empty until crun joins it, so this never fires on container start).
+# Self-launch pasta right after setup when conmon doesn't have to fire:
+# - network reload: teardown+setup on a *live* container never involves
+#   conmon, so nothing else would run the launch script
+# - no published ports: podman holds no reservation sockets for this
+#   container, so pasta may bind immediately and configure the netns in
+#   parallel with podman's spec/rootfs work; the conmon wrapper then only
+#   waits on the ready flag instead of triggering the launch itself
+# With published ports pasta must wait for the conmon wrapper to close
+# podman's reservation sockets first.
 # One ls+grep for the whole /proc scan: a readlink per pid costs seconds on
 # Android-scale process counts
 nsino=$(stat -Lc %i "$nsf" 2>/dev/null || echo _)
@@ -555,10 +568,19 @@ live=
 case $(ls -l /proc/[0-9]*/ns/net 2>/dev/null | grep -m1 "net:\[$nsino\]") in
   ?*) live=1;;
 esac
-if [ -n "$live" ] && [ -f "$STATE/$cid.launch.sh" ]; then
-  log "setup $cid netns already live (network reload); self-launching pasta"
-  mv "$STATE/$cid.launch.sh" "$STATE/$cid.launch.run"
-  setsid sh "$STATE/$cid.launch.run" </dev/null >/dev/null 2>&1 &
+if [ -f "$STATE/$cid.launch.sh" ]; then
+  early=
+  if [ -n "$live" ]; then
+    log "setup $cid netns already live (network reload); self-launching pasta"
+    early=1
+  elif [ -z "$pubargs" ]; then
+    log "setup $cid no published ports; early self-launch"
+    early=1
+  fi
+  if [ -n "$early" ]; then
+    mv "$STATE/$cid.launch.sh" "$STATE/$cid.launch.run"
+    setsid sh "$STATE/$cid.launch.run" </dev/null >/dev/null 2>&1 &
+  fi
 fi
 
 # shellcheck disable=SC2086 # intentional word splitting: frag list

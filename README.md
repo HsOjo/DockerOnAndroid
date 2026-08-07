@@ -151,6 +151,7 @@ Note on podman **>= 5.5**: pod infra containers switched to rootfs-overlay, whic
 - **Not true L2 isolation**: inter-container isolation is implemented at the IP layer + routing, not equivalent to veth-bridge layer-2 isolation; host firewall is also unavailable (no netfilter in kernel).
 - **"No outbound" on internal networks is enforced by flushing the container's route table** — a determined privileged container can add a default route back.
 - **EXPOSE connectivity relies on an asynchronous inspect** (querying the container's own config right after start); under extreme timing the first rule may arrive seconds late.
+- **Startup network race on containers with published ports**: podman holds the port reservations until the container starts, so pasta can only bind in the background — an entrypoint that hits the network instantly may catch a sub-second window. Containers without published ports are gated on netns readiness by the conmon wrapper and are not affected.
 - **Version-bound**: the wrappers depend on podman's netavark plugin protocol and conmon argument format; only the versions listed under [Compatibility](#compatibility) are validated. A podman package upgrade also overwrites the wrappers — see [Upgrading podman](#upgrading-podman).
 
 ## Layout

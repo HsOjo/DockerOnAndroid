@@ -185,6 +185,7 @@ dev=$(ip route get "$DEFAULT_DNS" 2>/dev/null | sed -n 's/.*dev \([^ ]*\).*/\1/p
 # they land on the first network's pasta
 pubargs=
 cpublished=
+cequal=
 pmf=$STATE/$cid.pm
 printf '%s' "$in" | jq -c '.port_mappings[]? // empty' > "$pmf" 2>/dev/null
 while IFS= read -r pm; do
@@ -213,6 +214,12 @@ while IFS= read -r pm; do
         pubargs="$pubargs -$t $hpi:$cpi"
       fi
       cpublished="$cpublished $t:$cpi"
+      # wildcard publishes with hp==cp already cover the container address;
+      # a cip-direct twin ([cip]:cp vs [*]:cp) collides in pasta's forward
+      # table and kills it, so those ports skip the cip-direct rules below
+      if [ "$hpi" = "$cpi" ]; then
+        case $hip in ""|0.0.0.0|::) cequal="$cequal $t:$cpi";; esac
+      fi
     done
     i=$((i+1))
   done
@@ -294,12 +301,17 @@ for net in $nets; do
     seen="$seen $e"
     pr=${e%%:*}; cp=${e#*:}
     [ -n "$cp" ] || continue
+    if [ "$first" = 1 ]; then
+      case " $cequal " in *" $pr:$cp "*) continue;; esac
+    fi
     [ -n "$cip4" ] && args="$args -$pr $cip4/$cp:$cp"
     [ -n "$cip6" ] && args="$args -$pr [$cip6]/$cp:$cp"
   done
   printf '%s\n' "$args" | sed 's/^ //' > "$STATE/$cid.pastaargs.$net"
+  ucequal=
+  [ "$first" = 1 ] && ucequal=$cequal
   cat > "$STATE/$cid.unit.$net" <<EOF
-ifn="$ifn" cip4="$cip4" cip6="$cip6" prefix4="$prefix4" gw4="$gw4" gw6="$gw6" gwflag4="$gwflag4" gwflag6="$gwflag6" smac="$smac" dev="$dev" noroute="$noroute" tid="$tid"
+ifn="$ifn" cip4="$cip4" cip6="$cip6" prefix4="$prefix4" gw4="$gw4" gw6="$gw6" gwflag4="$gwflag4" gwflag6="$gwflag6" smac="$smac" dev="$dev" noroute="$noroute" tid="$tid" cequal="$ucequal"
 EOF
 
   if [ "$dns_enabled" = "true" ]; then
@@ -383,6 +395,8 @@ start_unit() { # $1=net
     pp=${pe%%/*}; pr=${pe#*/}
     [ "$pp" -gt 0 ] 2>/dev/null || continue
     case $pr in udp) t=u;; *) t=t;; esac
+    # wildcard-published with hp==cp: a cip rule would collide in pasta
+    case " $cequal " in *" $t:$pp "*) continue;; esac
     if [ -n "$cip4" ]; then
       case " $* " in *" $cip4/$pp:$pp "*) :;; *) set -- "$@" -$t "$cip4/$pp:$pp";; esac
     fi
@@ -467,6 +481,7 @@ exp_args() {
     pp=${pe%%/*}; pr=${pe#*/}
     [ "$pp" -gt 0 ] 2>/dev/null || continue
     case $pr in udp) t=u;; *) t=t;; esac
+    case " $cequal " in *" $t:$pp "*) continue;; esac
     if [ -n "$cip4" ]; then
       case " $* " in *" $cip4/$pp:$pp "*) :;; *) ea_out="$ea_out -$t $cip4/$pp:$pp";; esac
     fi

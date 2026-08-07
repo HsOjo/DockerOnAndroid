@@ -64,6 +64,13 @@ t "v4 outbound: internet" "podman exec $P-cli ping -c1 -W3 223.5.5.5"
 # configured: an entrypoint that goes straight to the network must work
 t "race: entrypoint online at start" "podman run --rm --pull=never $IMG_ALP ping -c1 -W3 223.5.5.5"
 
+# hp==cp publishes: the wildcard rule must not be duplicated as a cip-direct
+# rule - pasta dies on the forwarding conflict otherwise
+podman run -d --pull=never --name $P-sp -p 18087:80 -p 18888:18888 "$IMG_WEB" >/dev/null
+tw "same-port: pasta survives" "p=\$(cat $STATE/\$(podman inspect -f '{{.Id}}' $P-sp 2>/dev/null).pastapid.* 2>/dev/null); [ -n \"\$p\" ] && kill -0 \$p 2>/dev/null" 15
+tw "same-port: published port works" "wget -q -O /dev/null --timeout=5 http://127.0.0.1:18087/" 15
+t "same-port: host listens on hp==cp port" "netstat -tln 2>/dev/null | grep -q ':18888 '"
+
 echo "== bridge: UDP publishing =="
 podman run -d --pull=never --name $P-udp -p 15353:5353/udp "$IMG_ALP" nc -u -l -p 5353 >/dev/null
 # one-shot datagrams are lossy before nc is listening: resend on every retry

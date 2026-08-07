@@ -316,6 +316,12 @@ EOF
     for a in $(printf '%s' "$pernet" | jq -r '.aliases[]? // empty'); do
       case ,$names, in *,$a,*) :;; *) names="$names,$a";; esac
     done
+    # aardvark serves record names verbatim; netavark >= 1.16 writes
+    # explicit FQDN entries (podman 5.7), older ones derived the zone
+    # themselves - append <name>.<net> so both resolve
+    fq=
+    for n in $(printf '%s' "$names" | tr ',' ' '); do fq="$fq,$n,$n.$net"; done
+    names=${fq#,}
     grep -v "^$cid " "$f" > "$f.tmp" 2>/dev/null; cat "$f.tmp" > "$f"; rm -f "$f.tmp"
     printf '%s %s %s %s\n' "$cid" "$cip4" "$cip6" "$names" >> "$f"
   fi
@@ -342,17 +348,32 @@ cat > "$STATE/$cid.launch.sh" <<EOF
 STATE="$STATE"; cid="$cid"; nsf="$nsf"; PASTA="$PASTA"
 EOF
 cat >> "$STATE/$cid.launch.sh" <<'LAUNCH_EOF'
+# readiness gate: the conmon wrapper holds container start until $cid.ready
+# appears (netns configured) or a timeout passes, so an entrypoint that uses
+# the network immediately never sees a half-configured namespace
+rm -f "$STATE/$cid.ready"
+
 # one supervisor per container: a relaunch (network reload) while the old
 # supervisor is alive must not spawn a second one; the lock lives outside
 # the teardown wipe pattern ($cid.*) so the same inode is locked throughout;
 # pasta closes fd 9
 exec 9>"$STATE/lock-$cid"
-flock -n 9 2>/dev/null || exit 0
+if ! flock -n 9 2>/dev/null; then
+  # a surviving supervisor (restart gap) owns the relaunch and signals
+  # readiness itself; just wait for it
+  i=0
+  while [ "$i" -lt 200 ] && [ ! -f "$STATE/$cid.ready" ]; do sleep 0.05; i=$((i+1)); done
+  exit 0
+fi
 
 log=$STATE/$cid.log
 [ -f "$log" ] && [ "$(stat -c %s "$log" 2>/dev/null)" -gt 1048576 ] 2>/dev/null && mv "$log" "$log.1"
 
-exp=$(/usr/bin/podman.real inspect -f '{{range $p,$_ := .Config.ExposedPorts}}{{$p}} {{end}}' "$cid" 2>/dev/null)
+# EXPOSE-only ports are read via podman inspect, which blocks until the
+# create transaction commits - i.e. until the container is actually started.
+# The first pasta pass below therefore runs with exp empty; the EXPOSE rules
+# are applied in a second pass afterwards
+exp=
 
 start_unit() { # $1=net
   un=$1
@@ -435,12 +456,52 @@ fixns_unit() { # $1=net
   fi
 }
 
+# extra args the EXPOSE set would add on top of the pastaargs file ($1=net);
+# empty when the running pasta already covers everything
+exp_args() {
+  ea_net=$1
+  . "$STATE/$cid.unit.$ea_net"
+  set -- $(cat "$STATE/$cid.pastaargs.$ea_net" 2>/dev/null)
+  ea_out=
+  for pe in $exp; do
+    pp=${pe%%/*}; pr=${pe#*/}
+    [ "$pp" -gt 0 ] 2>/dev/null || continue
+    case $pr in udp) t=u;; *) t=t;; esac
+    if [ -n "$cip4" ]; then
+      case " $* " in *" $cip4/$pp:$pp "*) :;; *) ea_out="$ea_out -$t $cip4/$pp:$pp";; esac
+    fi
+    if [ -n "$cip6" ]; then
+      case " $* " in *" [$cip6]/$pp:$pp "*) :;; *) ea_out="$ea_out -$t [$cip6]/$pp:$pp";; esac
+    fi
+  done
+  printf '%s' "$ea_out"
+}
+
+# first pass, exp still empty: netns base config only, then signal readiness
 for u in "$STATE/$cid.unit".*; do
   [ -f "$u" ] || continue
   n=${u##*.}
   start_unit "$n" || { echo "$(date '+%F %T') launch $cid $n pasta gave up" >> /tmp/nv-shim.log; continue; }
   fixns_unit "$n"
   echo "$(date '+%F %T') launch $cid $n pasta up pid=$(cat "$STATE/$cid.pastapid.$n" 2>/dev/null)" >> /tmp/nv-shim.log
+done
+: > "$STATE/$cid.ready"
+
+# state may have been wiped (container stopped) while we worked
+[ -f "$STATE/$cid.ip" ] || { rm -f "$STATE/lock-$cid"; exit 0; }
+
+# second pass: EXPOSE rules, now that inspect can commit; restart the pastas
+# whose arg list actually grows
+exp=$(/usr/bin/podman.real inspect -f '{{range $p,$_ := .Config.ExposedPorts}}{{$p}} {{end}}' "$cid" 2>/dev/null)
+for u in "$STATE/$cid.unit".*; do
+  [ -f "$u" ] || continue
+  n=${u##*.}
+  [ -n "$(exp_args "$n")" ] || continue
+  pp=$(cat "$STATE/$cid.pastapid.$n" 2>/dev/null)
+  case $(tr '\0' ' ' < "/proc/$pp/cmdline" 2>/dev/null) in *pasta*) kill "$pp" 2>/dev/null;; esac
+  start_unit "$n" || continue
+  fixns_unit "$n"
+  echo "$(date '+%F %T') launch $cid $n pasta restarted with EXPOSE rules pid=$(cat "$STATE/$cid.pastapid.$n" 2>/dev/null)" >> /tmp/nv-shim.log
 done
 
 while :; do
@@ -459,6 +520,9 @@ while :; do
     [ -n "$pp" ] && kill -0 "$pp" 2>/dev/null && continue
     start_unit "$n" || continue
     fixns_unit "$n"
+    # restart-gap gating: a relaunch during container restart re-signals
+    # readiness for the conmon wrapper waiting on the new netns
+    : > "$STATE/$cid.ready"
     echo "$(date '+%F %T') supervise $cid $n pasta relaunched pid=$(cat "$STATE/$cid.pastapid.$n" 2>/dev/null)" >> /tmp/nv-shim.log
   done
 done

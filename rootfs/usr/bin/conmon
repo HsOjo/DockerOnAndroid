@@ -3,8 +3,10 @@
 # 1. close podman's published-port reservation sockets (inherited LISTEN
 #    fds) so per-container pasta can bind them
 # 2. hand off to the netavark shim's launch script, which needs exactly
-#    those ports (runs detached: it may block on boltdb while inspecting
-#    EXPOSE ports, and conmon must start the container immediately)
+#    those ports
+# 3. hold container start until the launch script signals $cid.ready (netns
+#    configured); the timeout keeps a pasta failure non-fatal - the container
+#    then just starts without networking, as before
 STATE=/tmp/pasta/nv
 
 inodes=$(awk '$4=="0A"{print $10}' /proc/net/tcp /proc/net/tcp6 2>/dev/null
@@ -35,6 +37,10 @@ case $cid in *[!0-9a-f]* | "") cid= ;; esac
 if [ -n "$cid" ] && [ -f "$STATE/$cid.launch.sh" ]; then
   mv "$STATE/$cid.launch.sh" "$STATE/$cid.launch.run"
   setsid sh "$STATE/$cid.launch.run" </dev/null >/dev/null 2>&1 &
+  i=0
+  while [ "$i" -lt 200 ] && [ ! -f "$STATE/$cid.ready" ]; do
+    sleep 0.05; i=$((i+1))
+  done
 fi
 
 exec /usr/bin/conmon.real "$@"

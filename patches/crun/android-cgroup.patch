@@ -1,0 +1,125 @@
+diff --git a/src/libcrun/cgroup-resources.c b/src/libcrun/cgroup-resources.c
+index 7a4e52e..2faa2be 100644
+--- a/src/libcrun/cgroup-resources.c
++++ b/src/libcrun/cgroup-resources.c
+@@ -1167,20 +1167,27 @@ write_cpuset_resources (int dirfd_cpuset, int cgroup2, runtime_spec_schema_confi
+   if (cpu->cpus)
+     {
+       ret = write_file_and_check_controllers_at (cgroup2, dirfd_cpuset, "cpuset.cpus", "cpus",
+-                                                 cpu->cpus, strlen (cpu->cpus), err);
++                                                  cpu->cpus, strlen (cpu->cpus), err);
+       if (UNLIKELY (ret < 0))
+-        return ret;
++        {
++          /* DockerOnAndroid: drop cpuset limits on kernels with a broken
++             cpuset controller instead of failing the container.  */
++          crun_error_release (err);
++        }
+     }
+   if (cpu->mems)
+     {
+       ret = write_file_and_check_controllers_at (cgroup2, dirfd_cpuset, "cpuset.mems", "mems", cpu->mems, strlen (cpu->mems),
+-                                                 err);
++                                                  err);
+       if (UNLIKELY (ret < 0))
+-        return ret;
++        crun_error_release (err);
+     }
+   return 0;
+ }
+ 
++/* DockerOnAndroid build marker (kept so wrappers can identify this binary).  */
++const char crun_doa_marker[] = "DockerOnAndroid";
++
+ static int
+ open_cgroup_subsystem (const char *subsystem, const char *path, libcrun_error_t *err)
+ {
+diff --git a/src/libcrun/cgroup-setup.c b/src/libcrun/cgroup-setup.c
+index 798c7f0..6422e9b 100644
+--- a/src/libcrun/cgroup-setup.c
++++ b/src/libcrun/cgroup-setup.c
+@@ -220,7 +220,13 @@ enter_cgroup_v1_subsystem (pid_t pid, const char *subsystem, const char *path, b
+         {
+           ret = initialize_cpuset_subsystem (cgroup_path, err);
+           if (UNLIKELY (ret < 0))
+-            return ret;
++            {
++              /* DockerOnAndroid: tolerate kernels with a broken/unwritable
++                 cpuset (e.g. Android 3.10: root cpuset fixed at 0-N, writes
++                 to children fail with EINVAL, controller may even be
++                 unmounted).  cpuset limits simply do not apply there.  */
++              crun_error_release (err);
++            }
+         }
+       if (strcmp (subsystem, "memory") == 0)
+         {
+@@ -238,6 +244,17 @@ enter_cgroup_v1_subsystem (pid_t pid, const char *subsystem, const char *path, b
+         return 0;
+     }
+ 
++  /* DockerOnAndroid: never let a broken cpuset controller (e.g. Android
++     3.10: root cpuset pinned to 0-N, child writes EINVAL/ENOSPC) kill the
++     container; entering the cpuset cgroup is best-effort there.  */
++  if (strcmp (subsystem, "cpuset") == 0)
++    {
++      ret = move_process_to_cgroup (pid, subsystem, path, err);
++      if (UNLIKELY (ret < 0))
++        crun_error_release (err);
++      return 0;
++    }
++
+   return move_process_to_cgroup (pid, subsystem, path, err);
+ }
+ 
+diff --git a/src/libcrun/cgroup-utils.c b/src/libcrun/cgroup-utils.c
+index b894e24..899c293 100644
+--- a/src/libcrun/cgroup-utils.c
++++ b/src/libcrun/cgroup-utils.c
+@@ -454,10 +454,34 @@ libcrun_cgroup_read_pids_from_path (const char *path, bool recurse, pid_t **pids
+ 
+     case CGROUP_MODE_HYBRID:
+     case CGROUP_MODE_LEGACY:
+-      ret = append_paths (&cgroup_path, err, CGROUP_ROOT "/memory", path, NULL);
+-      if (UNLIKELY (ret < 0))
+-        return ret;
+-      break;
++      {
++        /* DockerOnAndroid: upstream hardcodes the memory controller, but
++           Android-class kernels ship without MEMCG.  Fall back to other
++           controllers - cgroup.procs lists the same pids under any of
++           them.  */
++        static const char *const v1_ctrls[] = { "memory", "cpu", "freezer", "cpuset", NULL };
++        size_t i;
++
++        dirfd = -1;
++        for (i = 0; v1_ctrls[i]; i++)
++          {
++            ret = append_paths (&cgroup_path, err, CGROUP_ROOT, v1_ctrls[i], path, NULL);
++            if (UNLIKELY (ret < 0))
++              return ret;
++
++            dirfd = open (cgroup_path, O_DIRECTORY | O_PATH | O_CLOEXEC);
++            if (dirfd >= 0)
++              break;
++            if (errno != ENOENT)
++              return crun_make_error (err, errno, "open `%s`", cgroup_path);
++
++            free (cgroup_path);
++            cgroup_path = NULL;
++          }
++        if (dirfd < 0)
++          return crun_make_error (err, ENOENT, "open cgroup.procs for `%s`", path);
++        goto have_dirfd;
++      }
+ 
+     default:
+       return crun_make_error (err, 0, "invalid cgroup mode `%d`", mode);
+@@ -467,6 +491,8 @@ libcrun_cgroup_read_pids_from_path (const char *path, bool recurse, pid_t **pids
+   if (dirfd < 0)
+     return crun_make_error (err, errno, "open `%s`", cgroup_path);
+ 
++have_dirfd:
++
+   n_pids = 0;
+   allocated = 0;
+ 

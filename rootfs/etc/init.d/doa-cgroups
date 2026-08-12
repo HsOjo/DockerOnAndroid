@@ -1,0 +1,52 @@
+#!/sbin/openrc-run
+# shellcheck shell=busybox
+# shellcheck disable=SC2034,SC2329 # openrc-run consumes description/depend/start externally
+# DockerOnAndroid: mount cgroup v1 controllers for podman/crun.
+# Android-class kernels have no cgroup v2; some postmarketOS boots leave
+# /sys/fs/cgroup completely empty, and crun refuses to start containers.
+description="Mount cgroup v1 controllers for podman"
+
+depend() {
+  before podman
+}
+
+start() {
+  ebegin "Mounting cgroup v1 controllers"
+  if ! grep -q ' /sys/fs/cgroup ' /proc/mounts; then
+    mkdir -p /sys/fs/cgroup
+    mount -t tmpfs -o mode=755 tmpfs /sys/fs/cgroup || { eend 1; return 1; }
+  fi
+  while read -r subsys _hier _num enabled _rest; do
+    case $subsys in '#'*) continue ;; esac
+    [ "$enabled" = 1 ] || continue
+    d=/sys/fs/cgroup/$subsys
+    grep -q " $d " /proc/mounts && continue
+    mkdir -p "$d"
+    mount -t cgroup -o "$subsys" cgroup "$d" 2>/dev/null || { rmdir "$d" 2>/dev/null; continue; }
+    # cpuset probe: Android 3.10 kernels pin the root cpuset to 0-N and refuse
+    # child writes (EINVAL). crun only enters controllers whose dir exists, so
+    # unmount a broken cpuset and remove the dir to keep crun away from it.
+    if [ "$subsys" = cpuset ]; then
+      p=$d/.doa-probe
+      if mkdir "$p" 2>/dev/null; then
+        ok=1
+        cat "$d/cpuset.mems" > "$p/cpuset.mems" 2>/dev/null || ok=0
+        [ "$ok" = 1 ] && { cat "$d/cpuset.cpus" > "$p/cpuset.cpus" 2>/dev/null || ok=0; }
+        rmdir "$p" 2>/dev/null
+      else
+        ok=0
+      fi
+      if [ "$ok" != 1 ]; then
+        umount "$d" 2>/dev/null
+      fi
+    fi
+  done < /proc/cgroups
+  # drop stale dirs of controllers that ended up unmounted; crun treats an
+  # existing dir as a usable controller and fails inside it.  only reachable
+  # on the tmpfs we own, so rm -rf is safe (cgroup mounts are skipped above).
+  for d in /sys/fs/cgroup/*; do
+    [ -d "$d" ] || continue
+    grep -q " $d " /proc/mounts || rm -rf "$d"
+  done
+  eend 0
+}

@@ -1,6 +1,8 @@
 .DS_Store
 /passt-src/
+/crun-src/
 /rootfs/usr/local/bin/pasta
+/rootfs/usr/bin/crun-doa
 /config.env
 *.log
 *.tmp

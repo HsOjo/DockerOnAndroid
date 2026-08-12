@@ -81,10 +81,11 @@ podman 创建容器时会**主动 bind + LISTEN 每一个发布端口并持有 f
 ```sh
 ./configure           # 实测内核能力, 生成 config.env
 ./build-pasta.sh      # 首次: 构建 pasta (见下节), 产出 rootfs/usr/local/bin/pasta (二进制不入库)
+./build-crun.sh       # 仅当 configure 报告 CRUN_PATCH=1 (内核无 MEMCG / cpuset 残缺): 构建打补丁的 crun
 ./install.sh          # 按 config.env 安装; podman/conmon/netavark 备份为 *.real, 已有配置备份为 *.doa-bak
 ```
 
-`configure` 按设备裁剪安装项：`crun-nomq`（无 IPC_NS）、podman wrapper（无 USER_NS）、存储驱动（overlayfs 或 vfs）均按需启用。重跑 `configure` + `install.sh` 会自动对账——不再需要的 podman wrapper 会从 `*.real` 恢复。（netavark 原生 bridge 路线经评估后放弃：安卓内核常见 filter 表只读、xt match 裁剪，用户态无法绕开。）
+`configure` 按设备裁剪安装项：`crun-nomq`（无 IPC_NS）、podman wrapper（无 USER_NS）、`utsns = "host"`（无 UTS_NS）、cgroup v1 挂载服务（开机未挂控制器时）、存储驱动（overlayfs 或 vfs）均按需启用。重跑 `configure` + `install.sh` 会自动对账——不再需要的 podman wrapper 会从 `*.real` 恢复。（netavark 原生 bridge 路线经评估后放弃：安卓内核常见 filter 表只读、xt match 裁剪，用户态无法绕开。）
 
 设备端验证：
 
@@ -161,9 +162,13 @@ rootfs/
                               # (Debian 系安装到 /usr/lib/podman)
   usr/local/bin/crun-nomq     # crun wrapper: 剥离容器不支持的 cgroup 挂载
                               # (pasta 二进制由 build-pasta.sh 产出, 不入库)
+  usr/bin/crun-doa            # (由 build-crun.sh 产出, 不入库: 打补丁的 crun,
+                              #  用于无 MEMCG 或 cpuset 残缺的内核)
+  etc/init.d/doa-cgroups      # openrc service: 挂载 cgroup v1 控制器 (按需)
   etc/containers/             # containers.conf / registries.conf 等
-install.sh  build-pasta.sh  uninstall.sh  test.sh
+install.sh  build-pasta.sh  build-crun.sh  uninstall.sh  test.sh
 patches/passt/android-compat.patch
+patches/crun/android-cgroup.patch
 ```
 
 ## 开发备忘

@@ -11,10 +11,11 @@ jobs:
       - name: syntax check (sh -n)
         run: |
           set -e
-          for f in configure install.sh build-pasta.sh uninstall.sh \
+          for f in configure install.sh build-pasta.sh build-crun.sh uninstall.sh \
                    rootfs/usr/bin/podman rootfs/usr/bin/conmon \
                    rootfs/usr/libexec/podman/netavark \
-                   rootfs/usr/local/bin/crun-nomq; do
+                   rootfs/usr/local/bin/crun-nomq \
+                   rootfs/etc/init.d/doa-cgroups; do
             echo "> $f"
             sh -n "$f"
           done
@@ -23,7 +24,8 @@ jobs:
         run: |
           sudo apt-get install -y shellcheck
           shellcheck -s sh \
-            configure install.sh build-pasta.sh uninstall.sh \
+            configure install.sh build-pasta.sh build-crun.sh uninstall.sh \
             rootfs/usr/bin/podman rootfs/usr/bin/conmon \
             rootfs/usr/libexec/podman/netavark \
-            rootfs/usr/local/bin/crun-nomq
+            rootfs/usr/local/bin/crun-nomq \
+            rootfs/etc/init.d/doa-cgroups

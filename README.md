@@ -84,10 +84,11 @@ Copy this repo onto the device however you like (ssh / adb / ...), then **run on
 ```sh
 ./configure           # probe the kernel empirically, write config.env
 ./build-pasta.sh      # first time: build pasta (see below), outputs rootfs/usr/local/bin/pasta (binary not tracked)
+./build-crun.sh       # only when configure reports CRUN_PATCH=1 (kernel without MEMCG / broken cpuset)
 ./install.sh          # installs per config.env; backs up podman/conmon/netavark as *.real and pre-existing configs as *.doa-bak
 ```
 
-`configure` tunes the install per device: `crun-nomq` (no IPC_NS), the podman wrapper (no USER_NS) and the storage driver (overlayfs vs vfs) are each enabled only when needed. Re-running `configure` + `install.sh` reconciles the system — the podman wrapper is restored from `*.real` when no longer needed. (A netavark native-bridge route was evaluated and dropped: Android kernels commonly ship read-only filter tables or trimmed xt matches, which no userspace workaround can fix.)
+`configure` tunes the install per device: `crun-nomq` (no IPC_NS), the podman wrapper (no USER_NS), `utsns = "host"` (no UTS_NS), a cgroup-v1 mount service (controllers not mounted at boot) and the storage driver (overlayfs vs vfs) are each enabled only when needed. Re-running `configure` + `install.sh` reconciles the system — the podman wrapper is restored from `*.real` when no longer needed. (A netavark native-bridge route was evaluated and dropped: Android kernels commonly ship read-only filter tables or trimmed xt matches, which no userspace workaround can fix.)
 
 Verify on the device:
 
@@ -164,9 +165,13 @@ rootfs/
                               # (installed to /usr/lib/podman on Debian-likes)
   usr/local/bin/crun-nomq     # crun wrapper: strips unsupported cgroup mounts
                               # (pasta binary produced by build-pasta.sh, not tracked)
+  usr/bin/crun-doa            # (produced by build-crun.sh, not tracked: patched crun
+                              #  for kernels w/o MEMCG or with broken cpuset)
+  etc/init.d/doa-cgroups      # openrc service: mount cgroup v1 controllers (if needed)
   etc/containers/             # containers.conf / registries.conf etc.
-install.sh  build-pasta.sh  uninstall.sh  test.sh
+install.sh  build-pasta.sh  build-crun.sh  uninstall.sh  test.sh
 patches/passt/android-compat.patch
+patches/crun/android-cgroup.patch
 ```
 
 ## Development notes

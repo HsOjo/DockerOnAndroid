@@ -34,6 +34,10 @@ if [ -z "$FILES" ]; then
 fi
 for f in $FILES; do
   case $f in
+    /etc/init.d/doa-cgroups)
+      rc-update del doa-cgroups 2>/dev/null || true
+      rm -f "$f"
+      ;;
     /etc/containers/*)
       if [ -f "$f.doa-bak" ]; then mv -f "$f.doa-bak" "$f"; else rm -f "$f"; fi
       ;;

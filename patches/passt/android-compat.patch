@@ -47,14 +47,22 @@ index 94cbe7f..9cbac61 100644
  		/* Keep CAP_NET_BIND_SERVICE, so we can splice
  		 * outbound connections to low port numbers
  		 */
-@@ -399,8 +409,11 @@ int isolate_prefork(const struct ctx *c)
+@@ -399,8 +409,19 @@ int isolate_prefork(const struct ctx *c)
  		flags |= CLONE_NEWPID;
  
  	if (unshare(flags)) {
 -		err_perror("Failed to detach isolating namespaces");
 -		return -errno;
++		/* Android-class kernels compile out some namespaces
++		 * (IPC/PID/UTS) and unshare() then fails EINVAL wholesale.
++		 * CLONE_NEWNS is the only one we can't live without here;
++		 * degrade gracefully to just it.
++		 */
 +		if (errno != EINVAL ||
-+		    unshare(flags & ~(CLONE_NEWIPC | CLONE_NEWPID))) {
++		    (unshare(flags & ~(CLONE_NEWIPC | CLONE_NEWPID)) &&
++		     (errno != EINVAL ||
++		      unshare(flags & ~(CLONE_NEWIPC | CLONE_NEWPID |
++					CLONE_NEWUTS))))) {
 +			err_perror("Failed to detach isolating namespaces");
 +			return -errno;
 +		}

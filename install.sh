@@ -78,10 +78,12 @@ FILES="$FILES /usr/local/bin/pasta"
 if [ "$CRUN_NOMQ" = 1 ]; then
   install_file rootfs/usr/local/bin/crun-nomq /usr/local/bin/crun-nomq
   install_file rootfs/usr/local/lib/crun-nomq.jq /usr/local/lib/crun-nomq.jq
+  mkdir -p /usr/local/share/doa
+  install_file rootfs/usr/local/share/doa/apt-sandbox.conf /usr/local/share/doa/apt-sandbox.conf
   chmod 755 /usr/local/bin/crun-nomq
-  FILES="$FILES /usr/local/bin/crun-nomq /usr/local/lib/crun-nomq.jq"
+  FILES="$FILES /usr/local/bin/crun-nomq /usr/local/lib/crun-nomq.jq /usr/local/share/doa/apt-sandbox.conf"
 else
-  rm -f /usr/local/bin/crun-nomq /usr/local/lib/crun-nomq.jq
+  rm -f /usr/local/bin/crun-nomq /usr/local/lib/crun-nomq.jq /usr/local/share/doa/apt-sandbox.conf
 fi
 
 if [ "$LO_FIX" = 1 ]; then

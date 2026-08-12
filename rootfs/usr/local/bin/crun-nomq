@@ -1,4 +1,14 @@
 #!/bin/sh
+# DockerOnAndroid crun wrapper: real binary is /usr/bin/crun (see install.sh).
+# - create/run: rewrite config.json through crun-nomq.jq (no IPC_NS kernels),
+#   plus bind-mount an apt sandbox-root config into images that ship apt
+# - exec: restore the original user and strip unusable cgroup fields
+# - state: crun marks a live container "stopped" when the cgroup freezer is
+#   unreadable (cgroup v2 freeze file never exists on this kernel, and the
+#   android-cgroup patch makes cgroup creation non-fatal, so the cgroup dir
+#   is simply absent). buildah polls `crun state` during RUN and tears down
+#   stdio on "stopped", SIGPIPE-killing healthy build steps. Re-check pid
+#   liveness ourselves and correct the verdict.
 bundle=
 state_root=/run/crun
 process_file=
@@ -45,12 +55,47 @@ if [ "${1:-}" = exec ] && [ -n "$last" ] && [ -f "$state_root/$last/status" ]; t
   exit $rc
 fi
 
+if [ "${1:-}" = state ] && [ -n "$last" ]; then
+  out=$(/usr/bin/crun "$@")
+  rc=$?
+  if [ "$rc" -eq 0 ] && [ -f "$state_root/$last/status" ] \
+    && [ "$(printf '%s' "$out" | jq -r '.status // empty' 2>/dev/null)" = stopped ]; then
+    pid=$(jq -r '.pid // 0' < "$state_root/$last/status" 2>/dev/null)
+    pst=$(jq -r '."process-start-time" // 0' < "$state_root/$last/status" 2>/dev/null)
+    if [ "$pid" -gt 0 ] 2>/dev/null && kill -0 "$pid" 2>/dev/null && [ -r "/proc/$pid/stat" ]; then
+      # comm may contain spaces/parens: split at the last ')' first
+      cur=$(awk '{n=split($0,a,") "); split(a[n],b," "); print b[20]}' "/proc/$pid/stat" 2>/dev/null)
+      pstate=$(awk '{n=split($0,a,") "); split(a[n],b," "); print b[1]}' "/proc/$pid/stat" 2>/dev/null)
+      if [ -n "$cur" ] && [ "$cur" = "$pst" ] && [ "$pstate" != Z ] && [ "$pstate" != X ]; then
+        fixed=$(printf '%s' "$out" | jq --argjson pid "$pid" '.status = "running" | .pid = $pid' 2>/dev/null)
+        [ -n "$fixed" ] && out=$fixed
+      fi
+    fi
+  fi
+  printf '%s\n' "$out"
+  exit "$rc"
+fi
+
 case " $* " in
   *" create "*|*" run "*)
     if [ -n "$bundle" ] && [ -f "$bundle/config.json" ]; then
       tmp=$bundle/config.json.nomq.$$
       jq -f /usr/local/lib/crun-nomq.jq "$bundle/config.json" > "$tmp" && cat "$tmp" > "$bundle/config.json"
       rm -f "$tmp"
+      # Android: apt drops to _apt (gid nogroup, supplementary groups wiped),
+      # which fails the kernel's aid_inet socket check. Bind-mount an apt
+      # config pinning the sandbox user to root into images that ship apt.
+      aptconf=/usr/local/share/doa/apt-sandbox.conf
+      rootfs=$(jq -r '.root.path // empty' "$bundle/config.json" 2>/dev/null)
+      case $rootfs in /*) :;; *) [ -n "$rootfs" ] && rootfs=$bundle/$rootfs;; esac
+      if [ -f "$aptconf" ] && [ -d "$rootfs/etc/apt/apt.conf.d" ]; then
+        tmp=$bundle/config.json.nomq-apt.$$
+        if jq --arg src "$aptconf" '.mounts += [{destination: "/etc/apt/apt.conf.d/zz-doa-sandbox.conf", type: "bind", source: $src, options: ["rbind", "ro"]}]' \
+            "$bundle/config.json" > "$tmp"; then
+          cat "$tmp" > "$bundle/config.json"
+        fi
+        rm -f "$tmp"
+      fi
     fi
     ;;
 esac

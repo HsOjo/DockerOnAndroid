@@ -85,7 +85,7 @@ podman 创建容器时会**主动 bind + LISTEN 每一个发布端口并持有 f
 ./install.sh          # 按 config.env 安装; podman/conmon/netavark 备份为 *.real, 已有配置备份为 *.doa-bak
 ```
 
-`configure` 按设备裁剪安装项：`crun-nomq`（无 IPC_NS）、podman wrapper（无 USER_NS）、`utsns = "host"`（无 UTS_NS）、cgroup v1 挂载服务（开机未挂控制器时）、存储驱动（overlayfs 或 vfs）均按需启用。重跑 `configure` + `install.sh` 会自动对账——不再需要的 podman wrapper 会从 `*.real` 恢复。（netavark 原生 bridge 路线经评估后放弃：安卓内核常见 filter 表只读、xt match 裁剪，用户态无法绕开。）
+`configure` 按设备裁剪安装项：`crun-nomq`（无 IPC_NS）、podman wrapper（无 USER_NS）、`utsns = "host"`（无 UTS_NS）、cgroup v1 挂载服务（开机未挂控制器时）、存储驱动（内核 overlayfs、fuse-overlayfs 或 vfs）均按需启用。重跑 `configure` + `install.sh` 会自动对账——不再需要的 podman wrapper 会从 `*.real` 恢复。（netavark 原生 bridge 路线经评估后放弃：安卓内核常见 filter 表只读、xt match 裁剪，用户态无法绕开。）
 
 设备端验证：
 
@@ -174,7 +174,8 @@ patches/crun/android-cgroup.patch
 ## 开发备忘
 
 - 设备上 podman 每次调用会拿 sqlite 全局锁；**shim 内禁止递归调用 podman**（setup 路径中 inspect 会死锁）——容器配置只能由 conmon wrapper 在容器启动后异步读取。
-- 容器镜像存储驱动为 `vfs`（无 overlayfs），数据库后端 `sqlite`（boltdb 在该内核上 mmap 行为异常）。
+- 容器镜像存储驱动：有内核 overlayfs 用 `overlay`，否则经 `fuse-overlayfs` 用 `overlay`，最后才退到 `vfs`；数据库后端 `sqlite`（boltdb 在该内核上 mmap 行为异常）。vfs 下每层、每个构建步骤都是整树复制，镜像稍大就不可用。切换驱动需清空 `/var/lib/containers/storage`（install.sh 会提示）。
+- 构建性能：只要配置了 `mount_program`（fuse-overlayfs），containers/storage 就强制走 naive diff——每个构建步骤的 commit 都要对父层和当前层做两次全树遍历，而不是直接读 overlay 的 upperdir（python 级镜像每步约 16 秒）。`podman build --squash` 跳过中间层提交，构建耗时大约减半；想在 mount_program 下启用 native diff 需要给 containers/storage 打补丁（fuse-overlayfs >= 1.x 的 whiteout 与内核兼容，理论上可行）。
 - busybox 环境：无 `grep -P`、无 `PIPESTATUS`，脚本保持 POSIX。
 
 ## License

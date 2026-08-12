@@ -88,7 +88,7 @@ Copy this repo onto the device however you like (ssh / adb / ...), then **run on
 ./install.sh          # installs per config.env; backs up podman/conmon/netavark as *.real and pre-existing configs as *.doa-bak
 ```
 
-`configure` tunes the install per device: `crun-nomq` (no IPC_NS), the podman wrapper (no USER_NS), `utsns = "host"` (no UTS_NS), a cgroup-v1 mount service (controllers not mounted at boot) and the storage driver (overlayfs vs vfs) are each enabled only when needed. Re-running `configure` + `install.sh` reconciles the system — the podman wrapper is restored from `*.real` when no longer needed. (A netavark native-bridge route was evaluated and dropped: Android kernels commonly ship read-only filter tables or trimmed xt matches, which no userspace workaround can fix.)
+`configure` tunes the install per device: `crun-nomq` (no IPC_NS), the podman wrapper (no USER_NS), `utsns = "host"` (no UTS_NS), a cgroup-v1 mount service (controllers not mounted at boot) and the storage driver (kernel overlayfs, fuse-overlayfs, or vfs) are each enabled only when needed. Re-running `configure` + `install.sh` reconciles the system — the podman wrapper is restored from `*.real` when no longer needed. (A netavark native-bridge route was evaluated and dropped: Android kernels commonly ship read-only filter tables or trimmed xt matches, which no userspace workaround can fix.)
 
 Verify on the device:
 
@@ -177,7 +177,8 @@ patches/crun/android-cgroup.patch
 ## Development notes
 
 - Every podman invocation on the device takes a global sqlite lock; **never call podman recursively inside the shim** (inspect in the setup path deadlocks) — container config can only be read asynchronously by the conmon wrapper after the container starts.
-- Image storage driver is `vfs` (no overlayfs); database backend is `sqlite` (boltdb's mmap misbehaves on this kernel).
+- Image storage driver is kernel `overlay` when available, else `overlay` via `fuse-overlayfs`, else `vfs`; database backend is `sqlite` (boltdb's mmap misbehaves on this kernel). With `vfs` every layer and every build step is a full-tree copy — unbearable beyond toy images. Switching drivers requires wiping `/var/lib/containers/storage` (install.sh warns).
+- Build performance: containers/storage forces *naive diff* whenever a `mount_program` (fuse-overlayfs) is configured, so each build-step commit walks both the parent and the current tree instead of just reading the overlay upperdir (~16 s per step for a python-sized image). `podman build --squash` skips intermediate image-layer commits and roughly halves build time; native diff with a mount program would need a containers/storage patch (whiteouts from fuse-overlayfs >= 1.x are kernel-compatible, so it should work).
 - busybox environment: no `grep -P`, no `PIPESTATUS`; scripts stay POSIX.
 
 ## License

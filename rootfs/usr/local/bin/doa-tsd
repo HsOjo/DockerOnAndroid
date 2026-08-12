@@ -1,0 +1,101 @@
+#!/usr/bin/env python3
+# doa-tsd: emulate /proc/thread-self on kernels < 3.17 (pure python, /dev/fuse).
+#
+# Every lookup of a name X under the mountpoint yields a symlink whose target
+# is /proc/<tid>/X, where <tid> is the requesting thread from the FUSE request
+# header. Remaining path components resolve inside procfs, so single-level
+# symlinks cover paths of any depth (/ns/net, /fd/3, /mountinfo, ...).
+import ctypes
+import os
+import struct
+import sys
+
+HDR = struct.Struct("<IIQQLLII")  # len, opcode, unique, nodeid, uid, gid, pid, _
+INIT_OUT = struct.Struct("<IIIII")  # major, minor, max_readahead, flags, max_write
+ATTR = struct.Struct("<QQQQQQIIIIIIIIII")  # ino,size,blocks,atime,mtime,ctime + 10x u32 (88 bytes)
+ENTRY_OUT = struct.Struct("<QQQQII",)  # nodeid, generation, entry_valid, attr_valid, entry_valid_ns, attr_valid_ns
+ATTR_OUT = struct.Struct("<QII",)  # attr_valid, attr_valid_ns, dummy
+
+OP_LOOKUP, OP_FORGET, OP_GETATTR, OP_READLINK = 1, 2, 3, 5
+OP_INIT, OP_OPENDIR, OP_READDIR, OP_RELEASEDIR = 26, 27, 28, 29
+OP_ACCESS, OP_DESTROY = 33, 37
+ENOENT, ENOSYS = 2, 38
+S_IFLNK, S_IFDIR = 0o120000, 0o040000
+
+libc = ctypes.CDLL(None, use_errno=True)
+BUF = 135168
+
+
+def attr(ino, mode, size=0):
+    return ATTR.pack(ino, size, 0, 0, 0, 0, 0, 0, 0, mode, 1, 0, 0, 0, 4096, 0)
+
+
+def reply(fd, unique, error, payload=b""):
+    head = struct.pack("<iIQ", 16 + len(payload), -error, unique)
+    os.writev(fd, [head, payload])
+
+
+def entry(nodeid, mode, size=0):
+    return ENTRY_OUT.pack(nodeid, 1, 0, 0, 0, 0) + attr(nodeid, mode, size)
+
+
+def mount_fuse(fd, mp):
+    data = b"fd=%d,rootmode=040555,user_id=0,group_id=0" % fd
+    if libc.mount(None, mp.encode(), b"fuse", 0, data) != 0:
+        e = ctypes.get_errno()
+        raise OSError(e, "mount: " + os.strerror(e))
+
+
+def serve(fd):
+    names = {}
+    nextid = 2
+    while True:
+        buf = os.read(fd, BUF)
+        if len(buf) < 40:
+            return
+        _len, op, unique, nodeid, _uid, _gid, pid, _ = HDR.unpack_from(buf)
+        if op == OP_INIT:
+            # major/minor/max_readahead/flags/max_write (7.x-compatible reply)
+            reply(fd, unique, 0, INIT_OUT.pack(7, 22, 0, 0, 4096))
+        elif op == OP_DESTROY:
+            return
+        elif op == OP_FORGET:
+            continue  # no reply
+        elif op == OP_LOOKUP:
+            name = buf[40:].split(b"\0")[0].decode()
+            nid = names.get(name)
+            if nid is None:
+                nid = nextid
+                names[name] = nid
+                nextid += 1
+            reply(fd, unique, 0, entry(nid, S_IFLNK | 0o777))
+        elif op == OP_GETATTR:
+            if nodeid == 1:
+                reply(fd, unique, 0, ATTR_OUT.pack(0, 0, 0) + attr(1, S_IFDIR | 0o555))
+            else:
+                reply(fd, unique, 0, ATTR_OUT.pack(0, 0, 0) + attr(nodeid, S_IFLNK | 0o777))
+        elif op == OP_READLINK:
+            name = next(n for n, i in names.items() if i == nodeid)
+            reply(fd, unique, 0, b"/proc/%d/%s" % (pid, name.encode()))
+        elif op == OP_OPENDIR or op == OP_RELEASEDIR:
+            reply(fd, unique, 0, struct.pack("<IIII", 0, 0, 0, 0))  # fuse_open_out
+        elif op == OP_READDIR:
+            reply(fd, unique, 0)
+        elif op == OP_ACCESS:
+            reply(fd, unique, 0)
+        else:
+            reply(fd, unique, ENOSYS)
+
+
+def main():
+    if len(sys.argv) != 2:
+        sys.exit("usage: doa-tsd <mountpoint>")
+    mp = sys.argv[1]
+    os.makedirs(mp, exist_ok=True)
+    fd = os.open("/dev/fuse", os.O_RDWR)
+    mount_fuse(fd, mp)
+    serve(fd)
+
+
+if __name__ == "__main__":
+    main()

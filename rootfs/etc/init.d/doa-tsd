@@ -1,0 +1,23 @@
+#!/sbin/openrc-run
+# DockerOnAndroid: /proc/thread-self emulation for kernels < 3.17.
+# podman.real references /run/doa-ts/<tid>/ns/* when creating netns; without
+# this FUSE mount every container start fails ENOENT after reboot.
+description="thread-self FUSE shim for podman"
+
+depend() {
+  before podman
+}
+
+start() {
+  ebegin "Mounting /run/doa-ts (thread-self shim)"
+  mkdir -p /run/doa-ts
+  grep -q " /run/doa-ts " /proc/mounts || start-stop-daemon --start --background --make-pidfile --pidfile /run/doa-tsd.pid --exec /usr/local/bin/doa-tsd -- /run/doa-ts
+  eend $?
+}
+
+stop() {
+  ebegin "Unmounting /run/doa-ts"
+  start-stop-daemon --stop --pidfile /run/doa-tsd.pid 2>/dev/null
+  umount /run/doa-ts 2>/dev/null || umount -l /run/doa-ts 2>/dev/null
+  eend 0
+}

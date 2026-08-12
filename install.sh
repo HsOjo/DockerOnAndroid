@@ -104,6 +104,37 @@ else
   rm -f /etc/init.d/doa-cgroups
 fi
 
+if [ "$TS_FIX" = 1 ]; then
+  # no /proc/thread-self: podman.real is binary-patched to resolve thread
+  # paths via /run/doa-ts, served by the doa-tsd FUSE shim
+  install_file rootfs/usr/local/bin/doa-tsd /usr/local/bin/doa-tsd
+  chmod 755 /usr/local/bin/doa-tsd
+  FILES="$FILES /usr/local/bin/doa-tsd"
+  PODB=/usr/bin/podman.real; [ -f "$PODB" ] || PODB=/usr/bin/podman
+  if grep -q /run/doa-ts "$PODB" 2>/dev/null; then
+    : # already patched
+  elif command -v perl >/dev/null 2>&1 && grep -q /proc/thread-self "$PODB" 2>/dev/null; then
+    echo "> patch $PODB (thread-self -> /run/doa-ts)"
+    perl patches/podman/thread-self.pl < "$PODB" > /.doa-install.tmp && \
+      chmod 755 /.doa-install.tmp && mv /.doa-install.tmp "$PODB"
+  else
+    echo "warn: cannot binary-patch $PODB (no perl or no thread-self refs); podman may fail to create netns" >&2
+  fi
+  if command -v rc-update >/dev/null 2>&1; then
+    install_file rootfs/etc/init.d/doa-tsd /etc/init.d/doa-tsd
+    chmod 755 /etc/init.d/doa-tsd
+    rc-update add doa-tsd boot
+    rc-service doa-tsd start 2>/dev/null || true
+    FILES="$FILES /etc/init.d/doa-tsd"
+  else
+    echo "warn: no openrc; run 'doa-tsd /run/doa-ts' before podman or containers will fail" >&2
+  fi
+else
+  rc-update del doa-tsd 2>/dev/null || true
+  rc-service doa-tsd stop 2>/dev/null || true
+  rm -f /etc/init.d/doa-tsd /usr/local/bin/doa-tsd
+fi
+
 # back up a pre-existing non-DoA config once before overwriting it
 backup_conf() {
   if [ -f "$1" ] && ! grep -q DockerOnAndroid "$1" 2>/dev/null && [ ! -f "$1.doa-bak" ]; then

@@ -28,6 +28,11 @@ rm -rf "$P"
 lo_fix=1
 ip addr show dev lo 2>/dev/null | grep -q 'inet 127\.' && lo_fix=0
 
+# /proc/thread-self: kernels < 3.17 lack it; podman gets a binary patch
+# (patches/podman/thread-self.pl) pointing at the doa-tsd FUSE shim instead
+ts_fix=0
+[ -e /proc/thread-self ] || ts_fix=1
+
 # cgroup v1 controllers mounted anywhere under /sys/fs/cgroup?
 cgroup_fix=1
 grep -q '^cgroup ' /proc/mounts && cgroup_fix=0
@@ -63,11 +68,12 @@ PIDNS=$([ "$ns_pid" = 1 ] && echo private || echo host)
 UTSNS=$([ "$ns_uts" = 1 ] && echo private || echo host)
 LO_FIX=$lo_fix
 CGROUP_FIX=$cgroup_fix
+TS_FIX=$ts_fix
 CRUN_PATCH=$crun_patch
 EOF
 
-echo "probes:   userns=$ns_user ipcns=$ns_ipc pidns=$ns_pid utsns=$ns_uts overlayfs=$([ "$storage" = overlay ] && echo 1 || echo 0) lo_ok=$((1-lo_fix)) cgroup_ok=$((1-cgroup_fix)) memcg=$memcg cpuset_ok=$cpuset_ok"
-echo "config:   storage=$storage podman_wrapper=$podman_wrapper crun_nomq=$crun_nomq crun_patch=$crun_patch"
+echo "probes:   userns=$ns_user ipcns=$ns_ipc pidns=$ns_pid utsns=$ns_uts overlayfs=$([ "$storage" = overlay ] && echo 1 || echo 0) lo_ok=$((1-lo_fix)) cgroup_ok=$((1-cgroup_fix)) thread_self=$((1-ts_fix)) memcg=$memcg cpuset_ok=$cpuset_ok"
+echo "config:   storage=$storage podman_wrapper=$podman_wrapper crun_nomq=$crun_nomq crun_patch=$crun_patch ts_fix=$ts_fix"
 [ ! -f rootfs/usr/local/bin/pasta ] && \
   echo "note:     no pasta binary yet; run ./build-pasta.sh before ./install.sh"
 [ "$crun_patch" = 1 ] && [ ! -f rootfs/usr/bin/crun-doa ] && \

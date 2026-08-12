@@ -30,12 +30,17 @@ for b in $WRAPPED; do
 done
 
 if [ -z "$FILES" ]; then
-  FILES="/usr/local/bin/pasta /usr/local/bin/crun-nomq /usr/local/lib/crun-nomq.jq"
+  FILES="/usr/local/bin/pasta /usr/local/bin/crun-nomq /usr/local/lib/crun-nomq.jq /usr/local/bin/doa-tsd /etc/init.d/doa-tsd"
 fi
 for f in $FILES; do
   case $f in
     /etc/init.d/doa-cgroups)
       rc-update del doa-cgroups 2>/dev/null || true
+      rm -f "$f"
+      ;;
+    /etc/init.d/doa-tsd)
+      rc-update del doa-tsd 2>/dev/null || true
+      rc-service doa-tsd stop 2>/dev/null || true
       rm -f "$f"
       ;;
     /etc/containers/*)

@@ -158,6 +158,10 @@ if [ "$cmd" = teardown ]; then
     pids="$pids $(cat "$p" 2>/dev/null)"
   done
   aliases=$(cat "$STATE/$cid.ip" 2>/dev/null)
+  # unpin a materialized netns bind mount (see setup) before wiping state
+  if [ -f "$STATE/$cid.netns" ]; then
+    umount "$STATE/$cid.netns" 2>/dev/null || umount -l "$STATE/$cid.netns" 2>/dev/null
+  fi
   # remove state first: the launch.sh supervisor polls for it and exits
   rm -f "$STATE/$cid".*
   # /tmp survives reboots here: stale pastapids may belong to reused PIDs,
@@ -178,6 +182,24 @@ log "setup $cid ($cname) nets=$(printf '%s' "$nets" | tr '\n' ',') nsf=$nsf"
 # pasta opens /dev/net/tun with dropped caps (egid aid_inet); Android creates
 # the node 1000:1016 0660, which survives only until reboot
 [ -c /dev/net/tun ] && { chgrp 3003 /dev/net/tun 2>/dev/null; chmod 660 /dev/net/tun 2>/dev/null; }
+
+# buildah hands us a transient /proc/<pid>/fd/<n> netns reference that it
+# closes as soon as setup returns; the pasta launch is asynchronous and would
+# find the path gone ("Couldn't open network namespace ..."). Pin the netns
+# with a bind mount while the fd is still valid; teardown umounts it.
+case $nsf in
+  /proc/*/fd/*)
+    stable=$STATE/$cid.netns
+    : > "$stable"
+    if mount --bind "$nsf" "$stable" 2>/dev/null; then
+      log "setup $cid pinned transient netns $nsf"
+      nsf=$stable
+    else
+      rm -f "$stable"
+      log "setup $cid could not pin transient netns $nsf"
+    fi
+    ;;
+esac
 
 dev=$(ip route get "$DEFAULT_DNS" 2>/dev/null | sed -n 's/.*dev \([^ ]*\).*/\1/p' | head -1)
 
@@ -580,6 +602,11 @@ if [ -f "$STATE/$cid.launch.sh" ]; then
   if [ -n "$early" ]; then
     mv "$STATE/$cid.launch.sh" "$STATE/$cid.launch.run"
     setsid sh "$STATE/$cid.launch.run" </dev/null >/dev/null 2>&1 &
+    # there is no conmon to gate on the ready flag in this path (buildah RUN
+    # steps hit the network the instant setup returns), so wait for pasta to
+    # finish the first configuration pass here
+    i=0
+    while [ "$i" -lt 100 ] && [ ! -f "$STATE/$cid.ready" ]; do sleep 0.05; i=$((i+1)); done
   fi
 fi
 

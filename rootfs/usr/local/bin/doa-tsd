@@ -11,7 +11,7 @@ import struct
 import sys
 
 HDR = struct.Struct("<IIQQLLII")  # len, opcode, unique, nodeid, uid, gid, pid, _
-INIT_OUT = struct.Struct("<IIIII")  # major, minor, max_readahead, flags, max_write
+INIT_OUT = struct.Struct("<IIIIIII")  # major, minor, max_readahead, flags, max_background, congestion_threshold, max_write
 ATTR = struct.Struct("<QQQQQQIIIIIIIIII")  # ino,size,blocks,atime,mtime,ctime + 10x u32 (88 bytes)
 ENTRY_OUT = struct.Struct("<QQQQII",)  # nodeid, generation, entry_valid, attr_valid, entry_valid_ns, attr_valid_ns
 ATTR_OUT = struct.Struct("<QII",)  # attr_valid, attr_valid_ns, dummy
@@ -55,8 +55,8 @@ def serve(fd):
             return
         _len, op, unique, nodeid, _uid, _gid, pid, _ = HDR.unpack_from(buf)
         if op == OP_INIT:
-            # major/minor/max_readahead/flags/max_write (7.x-compatible reply)
-            reply(fd, unique, 0, INIT_OUT.pack(7, 22, 0, 0, 4096))
+            # major/minor/max_readahead/flags/max_background/congestion_threshold/max_write (7.x-compatible reply)
+            reply(fd, unique, 0, INIT_OUT.pack(7, 22, 0, 0, 0, 0, 4096))
         elif op == OP_DESTROY:
             return
         elif op == OP_FORGET:

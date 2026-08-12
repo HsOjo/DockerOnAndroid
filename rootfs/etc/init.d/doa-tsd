@@ -11,7 +11,16 @@ depend() {
 start() {
   ebegin "Mounting /run/doa-ts (thread-self shim)"
   mkdir -p /run/doa-ts
-  grep -q " /run/doa-ts " /proc/mounts || start-stop-daemon --start --background --make-pidfile --pidfile /run/doa-tsd.pid --exec /usr/local/bin/doa-tsd -- /run/doa-ts
+  if grep -q " /run/doa-ts " /proc/mounts; then
+    if ls /run/doa-ts >/dev/null 2>&1; then
+      eend 0
+      return 0
+    fi
+    start-stop-daemon --stop --pidfile /run/doa-tsd.pid 2>/dev/null
+    umount -l /run/doa-ts 2>/dev/null
+  fi
+  rm -f /run/doa-tsd.pid
+  start-stop-daemon --start --background --make-pidfile --pidfile /run/doa-tsd.pid --exec /usr/local/bin/doa-tsd -- /run/doa-ts
   eend $?
 }
 

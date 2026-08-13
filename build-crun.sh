@@ -28,9 +28,9 @@ install_deps() {
 }
 
 [ -n "$PROXY" ] && export https_proxy="$PROXY" http_proxy="$PROXY"
-if ! command -v git >/dev/null 2>&1 || ! command -v make >/dev/null 2>&1 || ! command -v cc >/dev/null 2>&1; then
-  install_deps
-fi
+# always install: probing every header/lib (autoconf, libtool, *-dev) is
+# fragile, and apk/apt/dnf/pacman are no-ops on already-installed packages
+install_deps
 if [ ! -d crun-src/.git ]; then
   rm -rf crun-src
   git clone https://github.com/containers/crun.git crun-src

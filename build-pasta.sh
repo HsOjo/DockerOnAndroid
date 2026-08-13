@@ -22,9 +22,8 @@ install_deps() {
 }
 
 [ -n "$PROXY" ] && export https_proxy="$PROXY" http_proxy="$PROXY"
-if ! command -v git >/dev/null 2>&1 || ! command -v make >/dev/null 2>&1 || ! command -v cc >/dev/null 2>&1; then
-  install_deps
-fi
+# always install: package managers are no-ops on already-installed packages
+install_deps
 if [ ! -d passt-src/.git ]; then
   rm -rf passt-src
   git clone https://passt.top/passt passt-src

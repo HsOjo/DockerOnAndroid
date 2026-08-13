@@ -83,9 +83,9 @@ Copy this repo onto the device however you like (ssh / adb / ...), then **run on
 
 ```sh
 ./configure           # probe the kernel empirically, write config.env
-./build-pasta.sh      # first time: build pasta (see below), outputs rootfs/usr/local/bin/pasta (binary not tracked)
-./build-crun.sh       # only when configure reports CRUN_PATCH=1 (kernel without MEMCG / broken cpuset)
-./install.sh          # installs per config.env; backs up podman/conmon/netavark as *.real and pre-existing configs as *.doa-bak
+./install.sh          # installs per config.env; builds pasta/crun-doa on first run
+                      # (build scripts install their own deps); backs up podman/conmon/netavark
+                      # as *.real and pre-existing configs as *.doa-bak
 ```
 
 `configure` tunes the install per device: `crun-nomq` (no IPC_NS), the podman wrapper (no USER_NS), `utsns = "host"` (no UTS_NS), a cgroup-v1 mount service (controllers not mounted at boot) and the storage driver (kernel overlayfs, fuse-overlayfs, or vfs) are each enabled only when needed. Re-running `configure` + `install.sh` reconciles the system — the podman wrapper is restored from `*.real` when no longer needed. (A netavark native-bridge route was evaluated and dropped: Android kernels commonly ship read-only filter tables or trimmed xt matches, which no userspace workaround can fix.)

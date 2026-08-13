@@ -73,9 +73,9 @@ install_file() {
 }
 
 FILES=""
-[ -f rootfs/usr/local/bin/pasta ] || { echo "error: rootfs/usr/local/bin/pasta missing; run ./build-pasta.sh" >&2; exit 1; }
+[ -f rootfs/usr/local/bin/pasta ] || ./build-pasta.sh
 if [ "$CRUN_PATCH" = 1 ] && [ ! -f rootfs/usr/bin/crun-doa ]; then
-  echo "error: rootfs/usr/bin/crun-doa missing; run ./build-crun.sh" >&2; exit 1
+  ./build-crun.sh
 fi
 reconcile /usr/bin/podman "$PODMAN_WRAPPER" rootfs/usr/bin/podman
 reconcile /usr/bin/conmon 1 rootfs/usr/bin/conmon

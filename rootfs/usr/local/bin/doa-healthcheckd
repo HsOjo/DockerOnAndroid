@@ -1,0 +1,56 @@
+#!/bin/sh
+# doa-healthcheckd: per-container healthcheck scheduler for podman on systems
+# without systemd. podman delegates healthcheck timing to systemd transient
+# timers; without systemd (Android chroots, postmarketOS) a container with a
+# HEALTHCHECK stays in "starting" forever and docker compose hangs on
+# depends_on: service_healthy. Mirrors docker semantics: each container is
+# checked at its own configured interval (default 30s upstream).
+# usage: doa-healthcheckd [tick-seconds]   (poll granularity, default 5)
+set -u
+tick=${1:-5}
+state=/run/doa-healthcheckd
+mkdir -p "$state"
+
+# go duration string ("1h30m0s", "30s", "0s") -> seconds
+dur_to_s() {
+  d=$1 total=0
+  case $d in *h*) total=$(( ${d%%h*} * 3600 )); d=${d#*h} ;; esac
+  case $d in *m*) total=$(( total + ${d%%m*} * 60 )); d=${d#*m} ;; esac
+  case $d in *s*) s=${d%%s*}; total=$(( total + ${s%%.*} )) ;; esac
+  echo "$total"
+}
+
+# container healthcheck interval in seconds (0 = none), cached per container id
+interval_of() {
+  f=$state/$1.interval
+  if [ ! -f "$f" ]; then
+    ns=$(podman inspect --format '{{.Config.Healthcheck.Interval}}' "$1" 2>/dev/null || echo 0s)
+    dur_to_s "${ns:-0s}" > "$f"
+  fi
+  cat "$f"
+}
+
+while :; do
+  now=$(date +%s)
+  ids=$(podman ps -q 2>/dev/null)
+  for id in $ids; do
+    ivl=$(interval_of "$id")
+    [ "$ivl" -gt 0 ] 2>/dev/null || continue
+    duef=$state/$id.due
+    due=$(cat "$duef" 2>/dev/null || echo 0)
+    if [ "$now" -ge "$due" ]; then
+      podman healthcheck run "$id" >/dev/null 2>&1 || true
+      echo $(( $(date +%s) + ivl )) > "$duef"
+    fi
+  done
+  # drop state of containers that are gone
+  for f in "$state"/*.due "$state"/*.interval; do
+    [ -e "$f" ] || continue
+    id=${f%.*}; id=${id##*/}
+    case " $ids " in
+      *" $id "*) ;;
+      *) rm -f "$state/$id".due "$state/$id".interval ;;
+    esac
+  done
+  sleep "$tick"
+done

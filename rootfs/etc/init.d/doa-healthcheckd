@@ -1,0 +1,27 @@
+#!/sbin/openrc-run
+# shellcheck shell=busybox
+# shellcheck disable=SC2034,SC2329 # openrc-run consumes description/depend/start externally
+# DockerOnAndroid: healthcheck scheduler. podman runs container healthchecks via
+# systemd transient timers; Android-class systems have no systemd, so healthchecks
+# never execute and compose hangs on depends_on: service_healthy.
+description="podman healthcheck scheduler (no systemd)"
+
+pidfile=/run/doa-healthcheckd.pid
+
+depend() {
+  after podman
+}
+
+start() {
+  ebegin "Starting podman healthcheck scheduler"
+  rm -f "$pidfile"
+  start-stop-daemon --start --background --make-pidfile --pidfile "$pidfile" \
+    --exec /usr/local/bin/doa-healthcheckd
+  eend $?
+}
+
+stop() {
+  ebegin "Stopping podman healthcheck scheduler"
+  start-stop-daemon --stop --pidfile "$pidfile" 2>/dev/null
+  eend 0
+}

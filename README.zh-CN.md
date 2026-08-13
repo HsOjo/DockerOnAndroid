@@ -168,6 +168,9 @@ rootfs/
   usr/bin/crun-doa            # (由 build-crun.sh 产出, 不入库: 打补丁的 crun,
                               #  用于无 MEMCG 或 cpuset 残缺的内核)
   etc/init.d/doa-cgroups      # openrc service: 挂载 cgroup v1 控制器 (按需)
+  etc/init.d/doa-healthcheckd # openrc service: healthcheck 调度器 (podman 依赖
+                              #  systemd timer 执行 healthcheck, Android 上没有)
+  usr/local/bin/doa-healthcheckd # 调度循环本体
   etc/containers/             # containers.conf / registries.conf 等
 install.sh  build-pasta.sh  build-crun.sh  uninstall.sh  test.sh
 patches/passt/android-compat.patch

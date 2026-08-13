@@ -15,7 +15,9 @@ jobs:
                    rootfs/usr/bin/podman rootfs/usr/bin/conmon \
                    rootfs/usr/libexec/podman/netavark \
                    rootfs/usr/local/bin/crun-nomq \
-                   rootfs/etc/init.d/doa-cgroups; do
+                   rootfs/usr/local/bin/doa-healthcheckd \
+                   rootfs/etc/init.d/doa-cgroups \
+                   rootfs/etc/init.d/doa-healthcheckd; do
             echo "> $f"
             sh -n "$f"
           done
@@ -28,4 +30,6 @@ jobs:
             rootfs/usr/bin/podman rootfs/usr/bin/conmon \
             rootfs/usr/libexec/podman/netavark \
             rootfs/usr/local/bin/crun-nomq \
-            rootfs/etc/init.d/doa-cgroups
+            rootfs/usr/local/bin/doa-healthcheckd \
+            rootfs/etc/init.d/doa-cgroups \
+            rootfs/etc/init.d/doa-healthcheckd

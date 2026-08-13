@@ -171,6 +171,9 @@ rootfs/
   usr/bin/crun-doa            # (produced by build-crun.sh, not tracked: patched crun
                               #  for kernels w/o MEMCG or with broken cpuset)
   etc/init.d/doa-cgroups      # openrc service: mount cgroup v1 controllers (if needed)
+  etc/init.d/doa-healthcheckd # openrc service: healthcheck scheduler (podman relies
+                              #  on systemd timers for healthchecks; none on Android)
+  usr/local/bin/doa-healthcheckd # the scheduler loop itself
   etc/containers/             # containers.conf / registries.conf etc.
 install.sh  build-pasta.sh  build-crun.sh  uninstall.sh  test.sh
 patches/passt/android-compat.patch

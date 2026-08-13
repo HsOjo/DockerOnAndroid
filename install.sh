@@ -32,6 +32,11 @@ if ! command -v jq >/dev/null 2>&1; then
   pkg_install jq
 fi
 
+if ! command -v docker >/dev/null 2>&1; then
+  echo "> installing podman-docker (docker CLI shim; also enables 'docker compose' via the podman socket)"
+  pkg_install podman-docker
+fi
+
 if [ "$STORAGE_DRIVER" = fuse-overlayfs ] && ! command -v fuse-overlayfs >/dev/null 2>&1; then
   echo "> installing fuse-overlayfs (no kernel overlayfs; vfs does a full-tree copy per layer)"
   pkg_install fuse-overlayfs
@@ -140,6 +145,22 @@ else
   rc-update del doa-tsd 2>/dev/null || true
   rc-service doa-tsd stop 2>/dev/null || true
   rm -f /etc/init.d/doa-tsd /usr/local/bin/doa-tsd
+fi
+
+# podman schedules container healthchecks via systemd transient timers; without
+# systemd they never run, containers stay "starting" and compose hangs on
+# depends_on: service_healthy. doa-healthcheckd replicates the scheduling.
+install_file rootfs/usr/local/bin/doa-healthcheckd /usr/local/bin/doa-healthcheckd
+chmod 755 /usr/local/bin/doa-healthcheckd
+FILES="$FILES /usr/local/bin/doa-healthcheckd"
+if command -v rc-update >/dev/null 2>&1; then
+  install_file rootfs/etc/init.d/doa-healthcheckd /etc/init.d/doa-healthcheckd
+  chmod 755 /etc/init.d/doa-healthcheckd
+  rc-update add doa-healthcheckd default
+  rc-service doa-healthcheckd start 2>/dev/null || true
+  FILES="$FILES /etc/init.d/doa-healthcheckd"
+else
+  echo "warn: no openrc; run 'doa-healthcheckd &' after podman starts or healthchecks will never fire" >&2
 fi
 
 # Android kernels fail podman's native-diff probe even though overlay mounts

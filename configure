@@ -21,10 +21,9 @@ storage=vfs
 rm -rf "$P"; mkdir -p "$P"; mkdir "$P/l" "$P/u" "$P/w" "$P/m"
 if mount -t overlay overlay -o "lowerdir=$P/l,upperdir=$P/u,workdir=$P/w" "$P/m" 2>/dev/null; then
   storage=overlay; umount "$P/m"
-elif [ -c /dev/fuse ] && command -v fuse-overlayfs >/dev/null 2>&1; then
+elif [ -c /dev/fuse ]; then
   # no kernel overlayfs: userspace overlay still beats vfs' full-tree copy
-  # per layer/step. install.sh will pkg-install fuse-overlayfs when the
-  # binary is missing, but the probe only selects what is already here.
+  # per layer/step. install.sh pkg-installs fuse-overlayfs when missing.
   storage=fuse-overlayfs
 fi
 rm -rf "$P"

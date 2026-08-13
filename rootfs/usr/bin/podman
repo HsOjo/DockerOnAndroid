@@ -8,11 +8,26 @@
 #   appends --squash to skip the intermediate commits (~30% off cold builds).
 #   Squashed output keeps no intermediate layers, so it neither uses nor
 #   produces build cache — opt in for one-shot/final builds only.
+# - stop/rm right after container exit can race fuse-overlayfs teardown and
+#   fail EBUSY on the merged mount; retry once after a beat. stop is
+#   idempotent on an already-stopped container, so the retry is safe.
 case "${1:-}" in
   build|bud)
     case " $* " in *" --squash"*) :;; *)
       [ "${DOA_BUILD_SQUASH:-0}" = 1 ] && set -- "$@" --squash
     ;; esac
+    ;;
+  rm|stop)
+    err=$(mktemp /tmp/podman.err.XXXXXX) || exec /usr/bin/podman.real "$@"
+    /usr/bin/podman.real "$@" 2>"$err"; rc=$?
+    if [ "$rc" -ne 0 ] && grep -q "device or resource busy" "$err"; then
+      sleep 0.5
+      : > "$err"
+      /usr/bin/podman.real "$@" 2>"$err"; rc=$?
+    fi
+    grep -v "Failed to read current user namespace mappings" "$err" >&2
+    rm -f "$err"
+    exit "$rc"
     ;;
 esac
 export PODMAN_IGNORE_CGROUPSV1_WARNING=1

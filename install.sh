@@ -120,12 +120,12 @@ if [ "$TS_FIX" = 1 ]; then
   PODB=/usr/bin/podman.real; [ -f "$PODB" ] || PODB=/usr/bin/podman
   if grep -q /run/doa-ts "$PODB" 2>/dev/null; then
     : # already patched
-  elif command -v perl >/dev/null 2>&1 && grep -q /proc/thread-self "$PODB" 2>/dev/null; then
+  elif command -v python3 >/dev/null 2>&1 && grep -q /proc/thread-self "$PODB" 2>/dev/null; then
     echo "> patch $PODB (thread-self -> /run/doa-ts)"
-    perl patches/podman/thread-self.pl < "$PODB" > /.doa-install.tmp && \
+    python3 patches/podman/thread-self.py < "$PODB" > /.doa-install.tmp && \
       chmod 755 /.doa-install.tmp && mv /.doa-install.tmp "$PODB"
   else
-    echo "warn: cannot binary-patch $PODB (no perl or no thread-self refs); podman may fail to create netns" >&2
+    echo "warn: cannot binary-patch $PODB (no python3 or no thread-self refs); podman may fail to create netns" >&2
   fi
   if command -v rc-update >/dev/null 2>&1; then
     install_file rootfs/etc/init.d/doa-tsd /etc/init.d/doa-tsd

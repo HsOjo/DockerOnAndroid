@@ -34,7 +34,7 @@ lo_fix=1
 ip addr show dev lo 2>/dev/null | grep -q 'inet 127\.' && lo_fix=0
 
 # /proc/thread-self: kernels < 3.17 lack it; podman gets a binary patch
-# (patches/podman/thread-self.pl) pointing at the doa-tsd FUSE shim instead
+# (patches/podman/thread-self.py) pointing at the doa-tsd FUSE shim instead
 ts_fix=0
 [ -e /proc/thread-self ] || ts_fix=1
 

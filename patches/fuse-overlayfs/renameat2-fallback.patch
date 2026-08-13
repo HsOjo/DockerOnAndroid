@@ -1,0 +1,19 @@
+diff --git a/main.c b/main.c
+index 4df64ec..e9dd9c1 100644
+--- a/main.c
++++ b/main.c
+@@ -1107,7 +1107,13 @@ static int
+ direct_renameat2 (int olddirfd, const char *oldpath,
+                   int newdirfd, const char *newpath, unsigned int flags)
+ {
+-  return syscall (SYS_renameat2, olddirfd, oldpath, newdirfd, newpath, flags);
++  int ret = syscall (SYS_renameat2, olddirfd, oldpath, newdirfd, newpath, flags);
++  /* DockerOnAndroid: kernels < 3.15 have no renameat2 syscall; a plain
++     rename (flags == 0) is exactly renameat, so fall back instead of
++     returning ENOSYS to every rename in the container.  */
++  if (ret < 0 && errno == ENOSYS && flags == 0)
++    ret = renameat (olddirfd, oldpath, newdirfd, newpath);
++  return ret;
+ }
+ 
+ static int

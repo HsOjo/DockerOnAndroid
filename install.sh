@@ -77,10 +77,14 @@ FILES=""
 if [ "$CRUN_PATCH" = 1 ] && [ ! -f rootfs/usr/bin/crun-doa ]; then
   ./build-crun.sh
 fi
+if [ "$FOV_PATCH" = 1 ] && [ ! -f rootfs/usr/bin/fuse-overlayfs-doa ]; then
+  ./build-fuse-overlayfs.sh
+fi
 reconcile /usr/bin/podman "$PODMAN_WRAPPER" rootfs/usr/bin/podman
 reconcile /usr/bin/conmon 1 rootfs/usr/bin/conmon
 reconcile "$LIBEXEC/netavark" 1 rootfs/usr/libexec/podman/netavark
 reconcile /usr/bin/crun "$CRUN_PATCH" rootfs/usr/bin/crun-doa
+reconcile /usr/bin/fuse-overlayfs "$FOV_PATCH" rootfs/usr/bin/fuse-overlayfs-doa
 install_file rootfs/usr/local/bin/pasta /usr/local/bin/pasta
 chmod 755 /usr/local/bin/pasta
 FILES="$FILES /usr/local/bin/pasta"

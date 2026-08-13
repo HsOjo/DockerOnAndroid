@@ -28,6 +28,15 @@ elif [ -c /dev/fuse ]; then
 fi
 rm -rf "$P"
 
+# renameat2: kernels < 3.15 lack the syscall, and fuse-overlayfs' plain-rename
+# path calls renameat2 with no ENOSYS fallback, so every rename inside a
+# container fails (apt, corepack, ...). Probe the syscall table; when it is
+# unreadable we err toward the patch (the fallback is harmless everywhere).
+fov_patch=0
+if [ "$storage" = fuse-overlayfs ] && ! grep -q renameat2 /proc/kallsyms 2>/dev/null; then
+  fov_patch=1
+fi
+
 # loopback already configured?
 lo_fix=1
 ip addr show dev lo 2>/dev/null | grep -q 'inet 127\.' && lo_fix=0
@@ -86,13 +95,16 @@ LO_FIX=$lo_fix
 CGROUP_FIX=$cgroup_fix
 TS_FIX=$ts_fix
 CRUN_PATCH=$crun_patch
+FOV_PATCH=$fov_patch
 GRAPHROOT=$graphroot
 EOF
 
 echo "probes:   userns=$ns_user ipcns=$ns_ipc pidns=$ns_pid utsns=$ns_uts overlayfs=$([ "$storage" = overlay ] && echo 1 || echo 0) lo_ok=$((1-lo_fix)) cgroup_ok=$((1-cgroup_fix)) thread_self=$((1-ts_fix)) memcg=$memcg cpuset_ok=$cpuset_ok"
-echo "config:   storage=$storage podman_wrapper=$podman_wrapper crun_nomq=$crun_nomq crun_patch=$crun_patch ts_fix=$ts_fix"
+echo "config:   storage=$storage podman_wrapper=$podman_wrapper crun_nomq=$crun_nomq crun_patch=$crun_patch fov_patch=$fov_patch ts_fix=$ts_fix"
 [ ! -f rootfs/usr/local/bin/pasta ] && \
   echo "note:     no pasta binary yet; run ./build-pasta.sh before ./install.sh"
 [ "$crun_patch" = 1 ] && [ ! -f rootfs/usr/bin/crun-doa ] && \
   echo "note:     kernel cgroup support is broken; run ./build-crun.sh before ./install.sh"
+[ "$fov_patch" = 1 ] && [ ! -f rootfs/usr/bin/fuse-overlayfs-doa ] && \
+  echo "note:     kernel has no renameat2; run ./build-fuse-overlayfs.sh before ./install.sh"
 echo "wrote $CONF — now run ./install.sh"

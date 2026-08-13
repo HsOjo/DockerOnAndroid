@@ -14,7 +14,7 @@ else LIBEXEC=
 fi
 
 # restore wrapped binaries from *.real backups
-for b in /usr/bin/podman /usr/bin/conmon /usr/bin/crun ${LIBEXEC:+$LIBEXEC/netavark}; do
+for b in /usr/bin/podman /usr/bin/conmon /usr/bin/crun /usr/bin/fuse-overlayfs ${LIBEXEC:+$LIBEXEC/netavark}; do
   [ -f "$b.real" ] || continue
   if is_wrapper "$b.real"; then
     echo "warn: $b.real is itself a DoA wrapper, skipping restore" >&2

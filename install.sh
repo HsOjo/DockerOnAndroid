@@ -157,7 +157,9 @@ if command -v rc-update >/dev/null 2>&1; then
   install_file rootfs/etc/init.d/doa-healthcheckd /etc/init.d/doa-healthcheckd
   chmod 755 /etc/init.d/doa-healthcheckd
   rc-update add doa-healthcheckd default
-  rc-service doa-healthcheckd start 2>/dev/null || true
+  # restart (not start): install.sh is meant to be re-run after git pull,
+  # and a no-op start would leave the old scheduler binary running
+  rc-service doa-healthcheckd restart 2>/dev/null || true
   FILES="$FILES /etc/init.d/doa-healthcheckd"
 else
   echo "warn: no openrc; run 'doa-healthcheckd &' after podman starts or healthchecks will never fire" >&2

@@ -60,8 +60,12 @@ crun_patch=0
 { [ "$memcg" = 0 ] || [ "$cpuset_ok" = 0 ]; } && crun_patch=1
 
 # graphroot: opt in via GRAPHROOT=... ./configure (e.g. when /var/lib is a
-# small rootfs and container data belongs on a bigger partition)
+# small rootfs and container data belongs on a bigger partition); once set it
+# sticks across re-runs, so plain ./configure doesn't silently revert it
 graphroot=${GRAPHROOT:-}
+if [ -z "$graphroot" ] && [ -f "$CONF" ]; then
+  graphroot=$(sed -n 's/^GRAPHROOT=//p' "$CONF")
+fi
 
 podman_wrapper=0; [ "$ns_user" = 0 ] && podman_wrapper=1
 crun_nomq=0; [ "$ns_ipc" = 0 ] && crun_nomq=1

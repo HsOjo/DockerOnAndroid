@@ -3,6 +3,18 @@
 # - export env podman needs on this kernel
 # - drop the noisy "Failed to read current user namespace mappings" warning
 #   that every rootful call prints on a kernel without user namespaces
+# - with a fuse-overlayfs mount_program, containers/storage falls back to
+#   naive diff and every per-step COMMIT walks both trees; DOA_BUILD_SQUASH=1
+#   appends --squash to skip the intermediate commits (~30% off cold builds).
+#   Squashed output keeps no intermediate layers, so it neither uses nor
+#   produces build cache — opt in for one-shot/final builds only.
+case "${1:-}" in
+  build|bud)
+    case " $* " in *" --squash"*) :;; *)
+      [ "${DOA_BUILD_SQUASH:-0}" = 1 ] && set -- "$@" --squash
+    ;; esac
+    ;;
+esac
 export PODMAN_IGNORE_CGROUPSV1_WARNING=1
 fifo=$(mktemp -u /tmp/podman.err.XXXXXX) || exec /usr/bin/podman.real "$@"
 mkfifo "$fifo" || exec /usr/bin/podman.real "$@"

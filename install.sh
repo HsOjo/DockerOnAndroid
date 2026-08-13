@@ -142,6 +142,18 @@ else
   rm -f /etc/init.d/doa-tsd /usr/local/bin/doa-tsd
 fi
 
+# Android kernels fail podman's native-diff probe even though overlay mounts
+# work, forcing slow userspace layer commits; no-op the probe (aarch64 only,
+# no change if the probe is not found)
+PODB=/usr/bin/podman.real; [ -f "$PODB" ] || PODB=/usr/bin/podman
+if command -v python3 >/dev/null 2>&1; then
+  echo "> patch $PODB (force native overlay diff)"
+  python3 patches/podman/naive-diff.py < "$PODB" > /.doa-install.tmp && \
+    chmod 755 /.doa-install.tmp && mv /.doa-install.tmp "$PODB"
+else
+  echo "warn: cannot binary-patch $PODB (no python3); layer commits will use slow naive diff" >&2
+fi
+
 # back up a pre-existing non-DoA config once before overwriting it
 backup_conf() {
   if [ -f "$1" ] && ! grep -q DockerOnAndroid "$1" 2>/dev/null && [ ! -f "$1.doa-bak" ]; then

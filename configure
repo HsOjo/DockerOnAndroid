@@ -37,9 +37,13 @@ ip addr show dev lo 2>/dev/null | grep -q 'inet 127\.' && lo_fix=0
 ts_fix=0
 [ -e /proc/thread-self ] || ts_fix=1
 
-# cgroup v1 controllers mounted anywhere under /sys/fs/cgroup?
+# cgroup v1 controllers mounted anywhere under /sys/fs/cgroup? mounts made by
+# our own doa-cgroups service don't count — without the service nothing would
+# mount them at boot, so a previous install must not flip this probe to 0
 cgroup_fix=1
-grep -q '^cgroup ' /proc/mounts && cgroup_fix=0
+if grep -q '^cgroup ' /proc/mounts && [ ! -e /etc/init.d/doa-cgroups ]; then
+  cgroup_fix=0
+fi
 
 # memory controller compiled in? crun kill --all hardcodes /sys/fs/cgroup/memory
 memcg=0; grep -q '^memory' /proc/cgroups && memcg=1

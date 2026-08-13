@@ -11,6 +11,9 @@
 # - stop/rm right after container exit can race fuse-overlayfs teardown and
 #   fail EBUSY on the merged mount; retry once after a beat. stop is
 #   idempotent on an already-stopped container, so the retry is safe.
+# - run --rm hits the same race in podman's internal cleanup; podman only
+#   prints an error, so drop the message and retry the removal ourselves.
+export PODMAN_IGNORE_CGROUPSV1_WARNING=1
 case "${1:-}" in
   build|bud)
     case " $* " in *" --squash"*) :;; *)
@@ -29,8 +32,30 @@ case "${1:-}" in
     rm -f "$err"
     exit "$rc"
     ;;
+  run)
+    cidf=$(mktemp /tmp/podman.cid.XXXXXX) || exec /usr/bin/podman.real "$@"
+    fifo=$(mktemp -u /tmp/podman.err.XXXXXX) || { rm -f "$cidf"; exec /usr/bin/podman.real "$@"; }
+    mkfifo "$fifo" || { rm -f "$cidf"; exec /usr/bin/podman.real "$@"; }
+    awk -v cidf="$cidf" '
+      /Failed to read current user namespace mappings/ { next }
+      /Removing container .*device or resource busy/ {
+        if (match($0, /Removing container [0-9a-f]+/))
+          print substr($0, RSTART + 19, RLENGTH - 19) > cidf
+        next
+      }
+      { print; fflush() }' < "$fifo" >&2 &
+    ap=$!
+    /usr/bin/podman.real "$@" 2>"$fifo"
+    rc=$?
+    wait "$ap" 2>/dev/null || true
+    rm -f "$fifo"
+    while IFS= read -r c; do
+      /usr/bin/podman.real rm -f "$c" >/dev/null 2>&1
+    done < "$cidf"
+    rm -f "$cidf"
+    exit "$rc"
+    ;;
 esac
-export PODMAN_IGNORE_CGROUPSV1_WARNING=1
 fifo=$(mktemp -u /tmp/podman.err.XXXXXX) || exec /usr/bin/podman.real "$@"
 mkfifo "$fifo" || exec /usr/bin/podman.real "$@"
 grep -v "Failed to read current user namespace mappings" < "$fifo" >&2 &

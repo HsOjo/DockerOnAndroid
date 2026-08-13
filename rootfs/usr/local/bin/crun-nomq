@@ -96,6 +96,28 @@ case " $* " in
         fi
         rm -f "$tmp"
       fi
+      # Android: daemons that drop privileges (nginx workers, sshd sessions)
+      # rebuild supplementary groups via initgroups() from /etc/group, losing
+      # the aid_inet gids injected above. Bind-mount an /etc/group variant
+      # giving every existing user Android's inet groups (a bind, not an
+      # edit, so committed build layers stay clean).
+      group=$rootfs/etc/group
+      if [ -f "$group" ] && [ -f "$rootfs/etc/passwd" ] && ! grep -q '^aid_inet:' "$group" 2>/dev/null; then
+        dogroup=$bundle/group.doa
+        { cat "$group"
+          users=$(cut -d: -f1 "$rootfs/etc/passwd" | tr '\n' ',' | sed 's/,$//')
+          echo "aid_inet:x:3003:$users"
+          echo "aid_net_raw:x:3004:$users"
+        } > "$dogroup" 2>/dev/null
+        if [ -s "$dogroup" ]; then
+          tmp=$bundle/config.json.nomq-grp.$$
+          if jq --arg src "$dogroup" 'if ([.mounts[].destination] | index("/etc/group")) then . else .mounts += [{destination: "/etc/group", type: "bind", source: $src, options: ["rbind", "ro"]}] end' \
+              "$bundle/config.json" > "$tmp"; then
+            cat "$tmp" > "$bundle/config.json"
+          fi
+          rm -f "$tmp"
+        fi
+      fi
     fi
     ;;
 esac

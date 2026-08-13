@@ -160,7 +160,10 @@ rootfs/
   usr/bin/conmon              # wrapper: 释放 LISTEN fd + 触发容器启动脚本
   usr/libexec/podman/netavark # 核心 shim: bridge 生命周期 / aardvark / 策略路由
                               # (Debian 系安装到 /usr/lib/podman)
-  usr/local/bin/crun-nomq     # crun wrapper: 剥离容器不支持的 cgroup 挂载
+  usr/local/bin/crun-nomq     # crun wrapper: 剥离容器不支持的 cgroup 挂载,
+                              #  注入 aid_inet/aid_net_raw (pid1 附加组 +
+                              #  /etc/group bind, 保证 setuid 守护进程不丢),
+                              #  apt 沙箱 bind, freezer 误读 state 修复
                               # (pasta 二进制由 build-pasta.sh 产出, 不入库)
   usr/bin/crun-doa            # (由 build-crun.sh 产出, 不入库: 打补丁的 crun,
                               #  用于无 MEMCG 或 cpuset 残缺的内核)

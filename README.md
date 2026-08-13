@@ -163,7 +163,10 @@ rootfs/
   usr/bin/conmon              # wrapper: release LISTEN fds + trigger launch script
   usr/libexec/podman/netavark # core shim: bridge lifecycle / aardvark / policy routing
                               # (installed to /usr/lib/podman on Debian-likes)
-  usr/local/bin/crun-nomq     # crun wrapper: strips unsupported cgroup mounts
+  usr/local/bin/crun-nomq     # crun wrapper: strips unsupported cgroup mounts,
+                              #  injects aid_inet/aid_net_raw (pid1 gids + an
+                              #  /etc/group bind so setuid daemons keep them),
+                              #  apt sandbox bind, freezer-misread state fix
                               # (pasta binary produced by build-pasta.sh, not tracked)
   usr/bin/crun-doa            # (produced by build-crun.sh, not tracked: patched crun
                               #  for kernels w/o MEMCG or with broken cpuset)

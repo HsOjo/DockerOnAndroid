@@ -101,8 +101,13 @@ case " $* " in
       # the aid_inet gids injected above. Bind-mount an /etc/group variant
       # giving every existing user Android's inet groups (a bind, not an
       # edit, so committed build layers stay clean).
+      # Skip for buildah build containers (podman build / podman-compose
+      # build, no libpod annotation): RUN steps install packages whose
+      # postinst groupadds into /etc/group, which must stay writable there,
+      # and no privilege-dropping daemon runs during a build anyway.
+      mgr=$(jq -r '.annotations["io.container.manager"] // empty' "$bundle/config.json" 2>/dev/null)
       group=$rootfs/etc/group
-      if [ -f "$group" ] && [ -f "$rootfs/etc/passwd" ] && ! grep -q '^aid_inet:' "$group" 2>/dev/null; then
+      if [ "$mgr" = libpod ] && [ -f "$group" ] && [ -f "$rootfs/etc/passwd" ] && ! grep -q '^aid_inet:' "$group" 2>/dev/null; then
         dogroup=$bundle/group.doa
         { cat "$group"
           users=$(cut -d: -f1 "$rootfs/etc/passwd" | tr '\n' ',' | sed 's/,$//')

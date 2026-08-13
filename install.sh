@@ -107,6 +107,18 @@ backup_conf() {
   fi
 }
 
+if [ "$WMEM_FIX" = 1 ]; then
+  mkdir -p /etc/sysctl.d
+  install_file rootfs/etc/sysctl.d/90-doa-tcp-wmem.conf /etc/sysctl.d/90-doa-tcp-wmem.conf
+  # apply now, not just at boot; existing pasta listeners must restart to
+  # inherit the new default, which the shim's supervise loop does on its own
+  # (config errors exit pasta, the loop relaunches it)
+  sysctl -p /etc/sysctl.d/90-doa-tcp-wmem.conf >/dev/null
+  FILES="$FILES /etc/sysctl.d/90-doa-tcp-wmem.conf"
+else
+  rm -f /etc/sysctl.d/90-doa-tcp-wmem.conf
+fi
+
 if [ "$LO_FIX" = 1 ]; then
   backup_conf /etc/network/interfaces
   install_file rootfs/etc/network/interfaces /etc/network/interfaces

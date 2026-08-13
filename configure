@@ -72,6 +72,23 @@ fi
 crun_patch=0
 { [ "$memcg" = 0 ] || [ "$cpuset_ok" = 0 ]; } && crun_patch=1
 
+# small default TCP send buffer: pasta's fallback path advertises the host
+# socket's SO_SNDBUF as the guest-side window. The 16K default on 3.x
+# kernels makes every guest burst hit a partial sendmsg(); the unsent tail
+# is dropped and the guest (no SACK toward pasta, 200ms min RTO) collapses
+# into RTO backoff - published ports crawl at KB/s. A >= 256K default keeps
+# window < buffer so partial sends don't happen (rootfs/etc/sysctl.d conf)
+wmem_fix=0
+# shellcheck disable=SC2046 # intentional: split tcp_wmem's three fields
+set -- $(cat /proc/sys/net/ipv4/tcp_wmem 2>/dev/null)
+if [ -e /etc/sysctl.d/90-doa-tcp-wmem.conf ]; then
+  # our own conf already raised the running value; without it the next boot
+  # would be back to the small default, so it must not flip this probe off
+  wmem_fix=1
+elif [ -n "$2" ] && [ "$2" -lt 262144 ] 2>/dev/null; then
+  wmem_fix=1
+fi
+
 # graphroot: opt in via GRAPHROOT=... ./configure (e.g. when /var/lib is a
 # small rootfs and container data belongs on a bigger partition); once set it
 # sticks across re-runs, so plain ./configure doesn't silently revert it
@@ -96,6 +113,7 @@ CGROUP_FIX=$cgroup_fix
 TS_FIX=$ts_fix
 CRUN_PATCH=$crun_patch
 FOV_PATCH=$fov_patch
+WMEM_FIX=$wmem_fix
 GRAPHROOT=$graphroot
 EOF
 

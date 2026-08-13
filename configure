@@ -59,6 +59,10 @@ fi
 crun_patch=0
 { [ "$memcg" = 0 ] || [ "$cpuset_ok" = 0 ]; } && crun_patch=1
 
+# graphroot: opt in via GRAPHROOT=... ./configure (e.g. when /var/lib is a
+# small rootfs and container data belongs on a bigger partition)
+graphroot=${GRAPHROOT:-}
+
 podman_wrapper=0; [ "$ns_user" = 0 ] && podman_wrapper=1
 crun_nomq=0; [ "$ns_ipc" = 0 ] && crun_nomq=1
 
@@ -74,6 +78,7 @@ LO_FIX=$lo_fix
 CGROUP_FIX=$cgroup_fix
 TS_FIX=$ts_fix
 CRUN_PATCH=$crun_patch
+GRAPHROOT=$graphroot
 EOF
 
 echo "probes:   userns=$ns_user ipcns=$ns_ipc pidns=$ns_pid utsns=$ns_uts overlayfs=$([ "$storage" = overlay ] && echo 1 || echo 0) lo_ok=$((1-lo_fix)) cgroup_ok=$((1-cgroup_fix)) thread_self=$((1-ts_fix)) memcg=$memcg cpuset_ok=$cpuset_ok"

@@ -14,6 +14,28 @@
 # - run --rm hits the same race in podman's internal cleanup; podman only
 #   prints an error, so drop the message and retry the removal ourselves.
 export PODMAN_IGNORE_CGROUPSV1_WARNING=1
+# kernels without a UTS namespace force utsns=host, and podman's specgen
+# validate rejects any explicitly-set hostname there (Error: invalid config
+# provided: cannot set hostname when running in the host UTS namespace).
+# The hostname could never be applied anyway, so drop the flag. CLI only —
+# API/compose callers go through the socket and cannot be intercepted here.
+if [ ! -e /proc/self/ns/uts ]; then
+  case ${1:-} in
+    run|create)
+      n=$#; skip=0
+      while [ "$n" -gt 0 ]; do
+        a=$1; shift
+        if [ "$skip" = 1 ]; then skip=0
+        else case $a in
+          --hostname|-h) skip=1 ;;
+          --hostname=*) ;;
+          *) set -- "$@" "$a" ;;
+        esac; fi
+        n=$((n-1))
+      done
+      ;;
+  esac
+fi
 case "${1:-}" in
   build|bud)
     case " $* " in *" --squash"*) :;; *)

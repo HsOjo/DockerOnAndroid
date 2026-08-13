@@ -136,7 +136,10 @@ if [ "$TS_FIX" = 1 ]; then
     install_file rootfs/etc/init.d/doa-tsd /etc/init.d/doa-tsd
     chmod 755 /etc/init.d/doa-tsd
     rc-update add doa-tsd boot
-    rc-service doa-tsd start 2>/dev/null || true
+    # restart (not start): re-running install.sh must pick up a new doa-tsd
+    # binary; the remount window is harmless since /run/doa-ts is only
+    # resolved at container creation
+    rc-service doa-tsd restart 2>/dev/null || true
     FILES="$FILES /etc/init.d/doa-tsd"
   else
     echo "warn: no openrc; run 'doa-tsd /run/doa-ts' before podman or containers will fail" >&2

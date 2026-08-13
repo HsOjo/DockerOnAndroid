@@ -96,9 +96,20 @@ else
   rm -f /usr/local/bin/crun-nomq /usr/local/lib/crun-nomq.jq /usr/local/share/doa/apt-sandbox.conf
 fi
 
+# back up a pre-existing non-DoA config once before overwriting it
+backup_conf() {
+  if [ -f "$1" ] && ! grep -q DockerOnAndroid "$1" 2>/dev/null && [ ! -f "$1.doa-bak" ]; then
+    cp "$1" "$1.doa-bak"
+  fi
+}
+
 if [ "$LO_FIX" = 1 ]; then
+  backup_conf /etc/network/interfaces
   install_file rootfs/etc/network/interfaces /etc/network/interfaces
   FILES="$FILES /etc/network/interfaces"
+else
+  if [ -f /etc/network/interfaces.doa-bak ]; then mv -f /etc/network/interfaces.doa-bak /etc/network/interfaces
+  else rm -f /etc/network/interfaces; fi
 fi
 
 if [ "$CGROUP_FIX" = 1 ]; then
@@ -179,13 +190,6 @@ if command -v python3 >/dev/null 2>&1; then
 else
   echo "warn: cannot binary-patch $PODB (no python3); layer commits will use slow naive diff" >&2
 fi
-
-# back up a pre-existing non-DoA config once before overwriting it
-backup_conf() {
-  if [ -f "$1" ] && ! grep -q DockerOnAndroid "$1" 2>/dev/null && [ ! -f "$1.doa-bak" ]; then
-    cp "$1" "$1.doa-bak"
-  fi
-}
 
 # generate configs from the rootfs templates per probe results
 RUNTIME=crun

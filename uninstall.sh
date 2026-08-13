@@ -48,7 +48,7 @@ for f in $FILES; do
       rc-service doa-healthcheckd stop 2>/dev/null || true
       rm -f "$f"
       ;;
-    /etc/containers/*)
+    /etc/containers/*|/etc/network/interfaces)
       if [ -f "$f.doa-bak" ]; then mv -f "$f.doa-bak" "$f"; else rm -f "$f"; fi
       ;;
     *) rm -f "$f" ;;

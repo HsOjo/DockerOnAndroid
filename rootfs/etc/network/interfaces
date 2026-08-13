@@ -1,2 +1,3 @@
+# DockerOnAndroid: loopback-only config for kernels where lo stays down
 auto lo
 iface lo inet loopback

@@ -178,7 +178,7 @@ patches/crun/android-cgroup.patch
 
 - 设备上 podman 每次调用会拿 sqlite 全局锁；**shim 内禁止递归调用 podman**（setup 路径中 inspect 会死锁）——容器配置只能由 conmon wrapper 在容器启动后异步读取。
 - 容器镜像存储驱动：有内核 overlayfs 用 `overlay`，否则经 `fuse-overlayfs` 用 `overlay`，最后才退到 `vfs`；数据库后端 `sqlite`（boltdb 在该内核上 mmap 行为异常）。vfs 下每层、每个构建步骤都是整树复制，镜像稍大就不可用。切换驱动需清空 `/var/lib/containers/storage`（install.sh 会提示）。
-- 构建性能：只要配置了 `mount_program`（fuse-overlayfs），containers/storage 就强制走 naive diff——每个构建步骤的 commit 都要对父层和当前层做两次全树遍历，而不是直接读 overlay 的 upperdir（python 级镜像每步约 16 秒）。`podman build --squash` 跳过中间层提交，构建耗时大约减半；想在 mount_program 下启用 native diff 需要给 containers/storage 打补丁（fuse-overlayfs >= 1.x 的 whiteout 与内核兼容，理论上可行）。
+- 构建性能：containers/storage 每个进程会探测一次内核的 native diff 支持，失败则回退 naive diff——在安卓上探测总是失败（内核 overlayfs 时如此，配置 `mount_program`（如 fuse-overlayfs）时更是如此），导致每个构建步骤的 commit 都要对父层和当前层做两次全树遍历，而不是直接读 overlay 的 upperdir。DoA 在安装时对 podman 做二进制补丁（`patches/podman/naive-diff.py`）将该探测变成 no-op，从而始终使用 native diff；fuse-overlayfs 的 whiteout 与内核兼容，3×30MB 构建从约 25 秒降到约 14 秒。`podman build --squash` 仍可用于完全跳过中间层提交。
 - busybox 环境：无 `grep -P`、无 `PIPESTATUS`，脚本保持 POSIX。
 
 ## License

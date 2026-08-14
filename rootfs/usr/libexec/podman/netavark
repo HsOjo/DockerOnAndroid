@@ -201,11 +201,6 @@ if [ "$cmd" = teardown ]; then
     done
     [ -n "$alive" ] && log "teardown $cid pasta$alive still alive after SIGKILL"
   fi
-  # drain fib/dst refs to the netns' lo before the namespace dies: on 3.10
-  # such refs leak into dst_ifdown's loopback re-pointing and wedge
-  # cleanup_net forever (netdev_run_todo), blocking all future netns creation
-  nsenter --net="$nsf" ip addr flush dev lo scope global 2>/dev/null
-  nsenter --net="$nsf" ip -6 addr flush dev lo scope global 2>/dev/null
   for a in $aliases; do
     lo_alias_del "$a"
   done
@@ -239,18 +234,6 @@ case $nsf in
 esac
 
 dev=$(ip route get "$DEFAULT_DNS" 2>/dev/null | sed -n 's/.*dev \([^ ]*\).*/\1/p' | head -1)
-
-# 3.10 kernels leak IPv6 addrconf refs when a device dies with a DAD timer
-# armed (fixed upstream v3.15..v4.9); the leaking netns then wedges cleanup_net
-# and blocks ALL future netns creation. pasta's tap gets a link-local + armed
-# DAD timer at up and its later NODAD does not disarm it on 3.10 — pre-disable
-# DAD for the tap before pasta exists. Runs before the launch script, so
-# conf.default is what the not-yet-created tap will inherit.
-# (disable_ipv6 is NOT an option: pasta's shared-address mode needs to set the
-# host's v6 template addresses in the namespace even on v4-only networks.)
-nsenter --net="$nsf" sysctl -q -w net.ipv6.conf.default.accept_dad=0 \
-  net.ipv6.conf.all.accept_dad=0 2>/dev/null || \
-  log "setup $cid could not disable DAD in netns (3.10 wedge guard)"
 
 # published ports -> host bindings (docker semantics, incl. host_ip + ranges);
 # they land on the first network's pasta

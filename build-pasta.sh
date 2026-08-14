@@ -9,13 +9,13 @@ PROXY=${PROXY:-}
 
 install_deps() {
   if command -v apk >/dev/null 2>&1; then
-    apk add git make gcc musl-dev linux-headers
+    apk add git make gcc musl-dev linux-headers coreutils
   elif command -v apt-get >/dev/null 2>&1; then
-    apt-get update && apt-get install -y git make gcc linux-libc-dev
+    apt-get update && apt-get install -y git make gcc linux-libc-dev coreutils
   elif command -v dnf >/dev/null 2>&1; then
-    dnf install -y git make gcc kernel-headers
+    dnf install -y git make gcc kernel-headers coreutils
   elif command -v pacman >/dev/null 2>&1; then
-    pacman -Sy --noconfirm git make gcc linux-api-headers
+    pacman -Sy --noconfirm git make gcc linux-api-headers coreutils
   else
     echo "error: no supported package manager (apk/apt-get/dnf/pacman)" >&2; exit 1
   fi

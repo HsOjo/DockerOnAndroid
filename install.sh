@@ -146,6 +146,18 @@ else
   else rm -f /etc/network/interfaces; fi
 fi
 
+# pasta needs /dev/net/tun inside the container netns; load tun now and
+# persist it (modules-load.d is honored by systemd and openrc's modules
+# service alike) so port publishing survives reboots
+[ -c /dev/net/tun ] || modprobe tun 2>/dev/null || true
+if [ ! -c /dev/net/tun ]; then
+  echo "warn: no /dev/net/tun (kernel TUN unavailable); pasta cannot give containers networking" >&2
+elif ! grep -qs '^tun$' /etc/modules-load.d/tun.conf /etc/modules 2>/dev/null; then
+  mkdir -p /etc/modules-load.d
+  install_file rootfs/etc/modules-load.d/tun.conf /etc/modules-load.d/tun.conf
+  FILES="$FILES /etc/modules-load.d/tun.conf"
+fi
+
 if [ "$CGROUP_FIX" = 1 ]; then
   if command -v rc-update >/dev/null 2>&1; then
     install_file rootfs/etc/init.d/doa-cgroups /etc/init.d/doa-cgroups

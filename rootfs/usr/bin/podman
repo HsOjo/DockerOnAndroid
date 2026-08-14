@@ -13,12 +13,20 @@
 #   idempotent on an already-stopped container, so the retry is safe.
 # - run --rm hits the same race in podman's internal cleanup; podman only
 #   prints an error, so drop the message and retry the removal ourselves.
+# - if a container ever ran while its merged dir was NOT mounted (stale
+#   "mounted" storage metadata after a crash/unclean reboot, upstream
+#   podman#23504), libpod writes its config files into the plain dir and every
+#   later removal dies ENOTEMPTY at Put's rename — sticky, retrying is futile.
+#   Auto-recover only when the dir holds nothing but known podman-generated
+#   files (hosts/resolv.conf/hostname/.containerenv + empty skeleton dirs);
+#   any other file means real container data — bail out and ask the user.
 export PODMAN_IGNORE_CGROUPSV1_WARNING=1
 # kernels without a UTS namespace force utsns=host, and podman's specgen
 # validate rejects any explicitly-set hostname there (Error: invalid config
 # provided: cannot set hostname when running in the host UTS namespace).
 # The hostname could never be applied anyway, so drop the flag. CLI only —
-# API/compose callers go through the socket and cannot be intercepted here.
+# callers talking to the API socket directly (podman-py, REST) cannot be
+# intercepted here; podman-compose shells out to this CLI, so it is covered.
 if [ ! -e /proc/self/ns/uts ]; then
   case ${1:-} in
     run|create)
@@ -49,6 +57,28 @@ case "${1:-}" in
       sleep 0.5
       : > "$err"
       /usr/bin/podman.real "$@" 2>"$err"; rc=$?
+    fi
+    if [ "$rc" -ne 0 ] && grep -q 'replacing mount point ".*": directory not empty' "$err"; then
+      m=$(sed -n 's|.*replacing mount point "\(/.*\)/merged".*|\1|p' "$err" | head -1)
+      m=$m/merged
+      # only touch overlay merged dirs; anything else is not ours to clean
+      case $m in */overlay/*/merged) ;; *) m= ;; esac
+      if [ -n "$m" ] && [ -d "$m" ]; then
+        bad=$(find "$m" ! -type d 2>/dev/null | sed "s|^$m/||" | \
+          grep -vFx -e etc/hosts -e etc/hostname -e etc/resolv.conf \
+                    -e run/.containerenv -e .containerenv | head -1)
+        if [ -z "$bad" ]; then
+          grep -q " $m " /proc/mounts 2>/dev/null && umount -l "$m" 2>/dev/null
+          rm -rf "$m" "$m.1"
+          echo "podman-wrapper: cleaned stale podman-generated files from unmounted $m; retrying" >&2
+          : > "$err"
+          /usr/bin/podman.real "$@" 2>"$err"; rc=$?
+        else
+          echo "podman-wrapper: $m holds non-podman file '$bad'; not auto-cleaning." >&2
+          echo "  inspect it (it may be real container data written while the overlay was lost)," >&2
+          echo "  then empty the dir and merged.1 by hand and retry: rm -rf '$m' '$m.1'" >&2
+        fi
+      fi
     fi
     grep -v "Failed to read current user namespace mappings" "$err" >&2
     rm -f "$err"

@@ -49,6 +49,6 @@ for f in /usr/local/bin/pasta /usr/local/bin/crun-nomq /usr/local/lib/crun-nomq.
   esac
 done
 
-rm -f /etc/dockeronandroid.manifest
+rm -f /etc/dockeronandroid.manifest /etc/containers/nodocker
 rm -rf /tmp/pasta /tmp/nv-shim.log /tmp/nv-aardvark.log /run/doa-healthcheckd
 echo "done: pristine state restored"

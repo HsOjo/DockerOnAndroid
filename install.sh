@@ -91,6 +91,10 @@ install_file() {
 }
 
 FILES=""
+
+# silence podman-docker's "Emulate Docker CLI" banner on every docker call
+touch /etc/containers/nodocker
+FILES="$FILES /etc/containers/nodocker"
 [ -f rootfs/usr/local/bin/pasta ] || ./build-pasta.sh
 if [ "$CRUN_PATCH" = 1 ] && [ ! -f rootfs/usr/bin/crun-doa ]; then
   ./build-crun.sh

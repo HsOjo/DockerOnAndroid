@@ -418,7 +418,7 @@ done
 printf '%s' "$nsf" > "$STATE/$cid.nsf"
 cat > "$STATE/$cid.launch.sh" <<EOF
 #!/bin/sh
-STATE="$STATE"; cid="$cid"; nsf="$nsf"; PASTA="$PASTA"
+STATE="$STATE"; cid="$cid"; nsf="$nsf"; PASTA="$PASTA"; runas="$runas"
 EOF
 cat >> "$STATE/$cid.launch.sh" <<'LAUNCH_EOF'
 # readiness gate: the conmon wrapper holds container start until $cid.ready

@@ -207,6 +207,20 @@ else
   echo "warn: cannot binary-patch $PODB (no python3); layer commits will use slow naive diff" >&2
 fi
 
+# podman-compose's attached `up` re-starts already-running containers, which
+# crun rejects with a bogus "cannot open exec.fifo" (start -a on a live
+# container is an unconditional runtime start upstream). Ship a compose
+# provider wrapper that attaches instead, and point compose_providers at it.
+COMPOSE_SED=
+if python3 -c 'import podman_compose' 2>/dev/null; then
+  install_file rootfs/usr/local/bin/podman-compose-doa /usr/local/bin/podman-compose-doa
+  chmod 755 /usr/local/bin/podman-compose-doa
+  FILES="$FILES /usr/local/bin/podman-compose-doa"
+  COMPOSE_SED='s|^#compose_providers=.*|compose_providers = ["/usr/local/bin/podman-compose-doa"]|'
+else
+  rm -f /usr/local/bin/podman-compose-doa
+fi
+
 # generate configs from the rootfs templates per probe results
 RUNTIME=crun
 [ "$CRUN_NOMQ" = 1 ] && RUNTIME=/usr/local/bin/crun-nomq
@@ -221,6 +235,7 @@ backup_conf /etc/containers/containers.conf
       -e "s/^pidns = .*/pidns = \"$PIDNS\"/" \
       -e "s/^utsns = .*/utsns = \"$UTSNS\"/" \
       -e "s|^runtime = .*|runtime = \"$RUNTIME\"|" \
+      ${COMPOSE_SED:+-e "$COMPOSE_SED"} \
       -e "$INFRASED" \
       rootfs/etc/containers/containers.conf; } > /.doa-conf.tmp
 echo "> etc/containers/containers.conf (runtime=$RUNTIME ipcns=$IPCNS pidns=$PIDNS utsns=$UTSNS infra_image=${INFRA_IMAGE:-none})"

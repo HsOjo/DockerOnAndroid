@@ -35,7 +35,7 @@ done
 # file is left alone.
 for f in /usr/local/bin/pasta /usr/local/bin/crun-nomq /usr/local/lib/crun-nomq.jq \
          /usr/local/share/doa/apt-sandbox.conf /usr/local/bin/doa-tsd \
-         /usr/local/bin/doa-healthcheckd \
+         /usr/local/bin/doa-healthcheckd /usr/local/bin/podman-compose-doa \
          /etc/network/interfaces \
          /etc/containers/containers.conf /etc/containers/storage.conf; do
   case $f in

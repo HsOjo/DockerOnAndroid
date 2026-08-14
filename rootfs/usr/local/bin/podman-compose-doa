@@ -1,0 +1,58 @@
+#!/usr/bin/env python3
+# DockerOnAndroid compose provider: podman-compose with one behavior fix.
+#
+# podman-compose's attached `up` issues `podman start -a` for EVERY service,
+# including containers that already exist and are running (its source carries
+# "# TODO: handle already existing"; still unfixed on upstream main).
+# podman's start+attach path (libpod oci_conmon_attach_common.go) calls
+# c.start() unconditionally, so crun gets a second `start` for a live
+# container whose exec.fifo was already consumed:
+#   cannot open `/run/crun/<id>/exec.fifo`: No such file or directory
+# docker compose semantics for an unchanged, running service are "attach to
+# it", so intercept run_container and rewrite start -a -> attach when the
+# container is already running. Any mismatch with the installed
+# podman-compose version falls back to stock behavior.
+import sys
+
+
+def _patch():
+    import podman_compose as pc
+
+    orig_run_container = pc.run_container
+
+    async def run_container(compose, name, deps, command, *args, **kwargs):
+        try:
+            podman_args, cmd, cmd_args = command
+            if cmd == "start" and "-a" in cmd_args:
+                out = await compose.podman.output(
+                    [], "inspect", ["--format", "{{.State.Running}}", name]
+                )
+                if out.decode().strip() == "true":
+                    print(
+                        f"podman-compose-doa: {name} is already running; "
+                        "attaching instead of re-starting "
+                        "(use --force-recreate to redeploy)",
+                        file=sys.stderr,
+                    )
+                    if deps:
+                        await pc.check_dep_conditions(compose, deps)
+                    command = (podman_args, "attach", [a for a in cmd_args if a != "-a"])
+        except Exception:
+            pass
+        return await orig_run_container(compose, name, deps, command, *args, **kwargs)
+
+    pc.run_container = run_container
+
+
+def main():
+    try:
+        _patch()
+    except Exception as e:
+        print(f"podman-compose-doa: patch not applied ({e}); stock behavior", file=sys.stderr)
+    import podman_compose as pc
+
+    pc.main()
+
+
+if __name__ == "__main__":
+    main()

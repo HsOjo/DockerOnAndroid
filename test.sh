@@ -171,6 +171,17 @@ services:
 EOF
   (cd /tmp/$P-compose && podman-compose -p $P up -d >/dev/null 2>&1)
   tw "compose: published port works" "wget -q -O /dev/null --timeout=5 http://127.0.0.1:$P_CMP/" 20
+  # attached re-up against already-running containers: stock podman-compose
+  # issues start -a unconditionally and crun fails with "cannot open
+  # exec.fifo"; the DoA compose provider rewrites it to attach (which blocks
+  # streaming, hence the timeout)
+  if command -v timeout >/dev/null 2>&1; then
+    out=$(cd /tmp/$P-compose && timeout 30 podman compose -p $P up 2>&1); rc=$?
+    case $out in
+      *exec.fifo*) bad "compose: attached re-up on running containers" ;;
+      *) [ "$rc" = 124 ] && ok "compose: attached re-up on running containers" || bad "compose: attached re-up on running containers (rc=$rc)" ;;
+    esac
+  fi
   (cd /tmp/$P-compose && podman-compose -p $P down >/dev/null 2>&1)
 fi
 

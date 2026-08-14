@@ -68,7 +68,7 @@ podman run -d --pull=never --name $P-web -p $P_WEB:80 "$IMG_WEB" >/dev/null || {
 tw "tcp: host -> published port" "wget -q -O /dev/null --timeout=5 http://127.0.0.1:$P_WEB/" 15
 cip_web=$(cip $P-web)
 t "tcp: host -> container IP" "wget -q -O /dev/null --timeout=5 http://$cip_web/"
-podman run -d --pull=never --name $P-cli "$IMG_ALP" sleep 600 >/dev/null
+podman run -d --pull=never --name $P-cli "$IMG_ALP" sleep 86400 >/dev/null
 gw4=$(podman network inspect podman | jq -r '.[0].subnets[] | select(.subnet | contains(":") | not) | .gateway // empty' | head -1)
 tw "v4 outbound: gateway" "podman exec $P-cli ping -c1 -W3 $gw4" 5
 t "v4 outbound: internet" "podman exec $P-cli ping -c1 -W3 223.5.5.5"
@@ -94,7 +94,7 @@ podman run -d --pull=never --name $P-web6 --network $P-v6 "$IMG_WEB" >/dev/null
 cip6=$(cip6n $P-web6 $P-v6)
 if [ -n "$cip6" ]; then ok "v6: container gets global address"; else bad "v6: container gets global address"; fi
 gw6=$(gw6n $P-v6)
-podman run -d --pull=never --name $P-cli6 --network $P-v6 "$IMG_ALP" sleep 600 >/dev/null
+podman run -d --pull=never --name $P-cli6 --network $P-v6 "$IMG_ALP" sleep 86400 >/dev/null
 sleep 1
 t "v6: ping gateway" "podman exec $P-cli6 $(ping6c "$gw6")"
 t "v6: host -> container" "wget -q -O /dev/null --timeout=5 http://[$cip6]/"
@@ -102,7 +102,7 @@ t "v6: outbound internet" "podman exec $P-cli6 $(ping6c 2400:3200::1)"
 
 echo "== multi-network + policy routing =="
 podman network create $P-n2 >/dev/null
-podman run -d --pull=never --name $P-multi --network podman --network $P-n2 "$IMG_ALP" sleep 600 >/dev/null
+podman run -d --pull=never --name $P-multi --network podman --network $P-n2 "$IMG_ALP" sleep 86400 >/dev/null
 sleep 1
 t "multi: two interfaces" "[ \$(podman exec $P-multi ip addr show scope global | grep -c 'inet ') -ge 2 ]"
 # podman assigns interfaces alphabetically, so either network may be the
@@ -111,8 +111,8 @@ t "multi: source policy rule" "podman exec $P-multi ip rule | grep -q 'from 10.'
 
 echo "== internal network =="
 podman network create --internal $P-int >/dev/null
-podman run -d --pull=never --name $P-int1 --network $P-int "$IMG_ALP" sleep 600 >/dev/null
-podman run -d --pull=never --name $P-int2 --network $P-int "$IMG_ALP" sleep 600 >/dev/null
+podman run -d --pull=never --name $P-int1 --network $P-int "$IMG_ALP" sleep 86400 >/dev/null
+podman run -d --pull=never --name $P-int2 --network $P-int "$IMG_ALP" sleep 86400 >/dev/null
 sleep 1
 cip_int1=$(cipn $P-int1 $P-int)
 t "internal: in-net connectivity" "podman exec $P-int2 ping -c1 -W2 $cip_int1"
@@ -121,7 +121,7 @@ tnot "internal: no outbound" "podman exec $P-int1 ping -c1 -W2 223.5.5.5"
 echo "== per-network DNS (aardvark) =="
 podman network create $P-dns >/dev/null
 podman run -d --pull=never --name $P-a --network $P-dns "$IMG_WEB" >/dev/null
-podman run -d --pull=never --name $P-b --network $P-dns "$IMG_ALP" sleep 600 >/dev/null
+podman run -d --pull=never --name $P-b --network $P-dns "$IMG_ALP" sleep 86400 >/dev/null
 tw "dns: short name resolves" "podman exec $P-b ping -c1 -W2 $P-a" 15
 tw "dns: FQDN resolves" "podman exec $P-b ping -c1 -W2 $P-a.$P-dns" 10
 

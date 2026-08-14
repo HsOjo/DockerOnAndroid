@@ -1,4 +1,4 @@
-(.mounts |= ([ .[] | select(.destination != "/dev/pts" and .destination != "/dev/mqueue") | if .destination == "/dev" then {destination:"/dev",type:"bind",source:"/dev",options:["bind","rprivate"]} else . end ]))
+(.mounts |= ([ .[] | select(.destination != "/dev/pts" and .destination != "/dev/mqueue") | if .destination == "/dev" then {destination:"/dev",type:"bind",source:"/dev",options:["bind","rprivate","ro"]} else . end ]))
 | del(.linux.resources.devices)
 | del(.linux.resources.pids)
 | . as $c

@@ -435,11 +435,27 @@ fi
 log=$STATE/$cid.log
 [ -f "$log" ] && [ "$(stat -c %s "$log" 2>/dev/null)" -gt 1048576 ] 2>/dev/null && mv "$log" "$log.1"
 
-# EXPOSE-only ports are read via podman inspect, which blocks until the
-# create transaction commits - i.e. until the container is actually started.
-# The first pasta pass below therefore runs with exp empty; the EXPOSE rules
-# are applied in a second pass afterwards
+# EXPOSE set without podman inspect (it blocks on the container lock until
+# the create transaction commits): containers.json maps cid -> image id and
+# the image config blob (filename is base64 of the config digest; busybox
+# base64 wraps at 76 cols, hence tr) holds config.ExposedPorts. The first
+# pasta pass therefore already carries the EXPOSE rules, so no restart
+# window opens after readiness; the inspect-based second pass below stays
+# as a fallback (extra --expose flags, storage layout changes)
 exp=
+GROOT=/var/lib/containers/storage
+# podman run keeps the create transaction open through start, so under run
+# the containers.json entry is invisible until start-commit and this read
+# finds nothing (the inspect-based second pass then restarts pasta with the
+# rules); standalone create+start commits early and the first pass already
+# carries the EXPOSE rules, so no restart window opens after readiness
+iid=$(jq -r --arg c "$cid" '.[] | select(.id == $c) | .image' \
+  "$GROOT/overlay-containers/containers.json" 2>/dev/null)
+if [ -n "$iid" ]; then
+  cblob=$GROOT/overlay-images/$iid/=$(printf %s "sha256:$iid" | base64 | tr -d '\n')
+  [ -f "$cblob" ] && \
+    exp=$(jq -r '(.config.ExposedPorts // .Config.ExposedPorts // {}) | keys | join(" ")' "$cblob" 2>/dev/null)
+fi
 
 start_unit() { # $1=net
   un=$1
@@ -478,6 +494,10 @@ start_unit() { # $1=net
     done
     if kill -0 "$pp" 2>/dev/null; then
       echo "$pp" > "$STATE/$cid.pastapid.$un"
+      # effective args (base + EXPOSE): the second pass diffs against these,
+      # not the base pastaargs file, so an unchanged EXPOSE set means no
+      # restart
+      printf '%s\n' "$*" > "$STATE/$cid.curargs.$un"
       return 0
     fi
     i=$((i+1)); sleep 0.5
@@ -532,12 +552,13 @@ fixns_unit() { # $1=net
   fi
 }
 
-# extra args the EXPOSE set would add on top of the pastaargs file ($1=net);
-# empty when the running pasta already covers everything
+# extra args the EXPOSE set would add on top of what the running pasta was
+# started with (curargs, falling back to the base pastaargs file); empty
+# when the running pasta already covers everything
 exp_args() {
   ea_net=$1
   . "$STATE/$cid.unit.$ea_net"
-  set -- $(cat "$STATE/$cid.pastaargs.$ea_net" 2>/dev/null)
+  set -- $(cat "$STATE/$cid.curargs.$ea_net" 2>/dev/null || cat "$STATE/$cid.pastaargs.$ea_net" 2>/dev/null)
   ea_out=
   for pe in $exp; do
     pp=${pe%%/*}; pr=${pe#*/}

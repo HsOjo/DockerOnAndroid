@@ -114,6 +114,8 @@ PROXY=http://<proxy>:<port> ./build-pasta.sh   # clone passt (固定 tag) -> 应
 
 shim 向 podman 自报为 netavark `1.13.1-pasta`，aardvark-dns 记录文件按 1.x 格式写入；上述两个 podman 版本均接受该接口。其他版本或许可用，但必须先通过下面的回归验证再投入生产。
 
+内核：开发与验证均在 4.4（Xiaomi whyred）上进行。**不支持 3.10 内核**（如 Xiaomi kenzo）——见[已知限制](#已知限制)中的 netns wedge 条目。
+
 ## 升级 podman
 
 包管理器升级（apk / apt / ...）会替换包属文件 `/usr/bin/podman`、`/usr/bin/conmon` 和 `<libexec>/netavark`，**静默覆盖 wrapper**——此后 bridge 网络的容器拿不到网络（setup 失败或 pasta 不会启动），而 host 网络的容器照常运行，问题不易察觉。`/usr/local`（pasta、crun-nomq）和 `/etc/containers` 不属于任何包，不受影响。
@@ -152,6 +154,7 @@ cp /usr/libexec/podman/netavark /usr/libexec/podman/netavark.real   # Debian 系
 - **版本绑定**：wrapper 依赖 podman 的 netavark 插件协议与 conmon 参数格式，仅[兼容性](#兼容性)中列出的版本经过验证。podman 包升级还会覆盖 wrapper——见[升级 podman](#升级-podman)。
 - **fuse-overlayfs 挂载丢失会让容器删除粘死（已自动恢复）**：若容器启动时其 `merged` 目录实际并未挂载（崩溃/非干净关机后存储元数据残留"已挂载"——上游 [podman#23504](https://github.com/containers/podman/issues/23504)，未修复），podman 会把容器配置文件（`etc/hosts`、`resolv.conf`、`hostname`、`run/.containerenv` 及空骨架目录）写进*普通目录*；此后每次 `rm` / `compose down` 都会死于 `replacing mount point ".../merged": directory not empty`，重试无效，storage 层容器泄漏进 `podman ps --storage`。podman wrapper 的 `rm`/`stop` 在目录*只含*上述已知 podman 生成文件时自动清理重试（podman-compose 也覆盖——它 shell 调 podman CLI）；出现任何其他文件意味着 overlay 丢失期间写入了真实容器数据，wrapper 会保留并给出人工恢复步骤。触发时请先用 `ps aux | grep fuse-overlayfs`、merged 目录列表和 `/proc/mounts` 取证——未解之谜是谁杀了 FUSE daemon（嫌疑：高负载下 Android LMK）。
 - **doa-tsd 死亡会导致所有容器无法启动**：thread-self FUSE shim 是单个 python 进程；一旦死亡，每次容器启动都报 `failed to bind mount ns at /run/netns/...: transport endpoint is not connected`。用 `rc-service doa-tsd restart` 恢复。
+- **不支持 3.10 内核（如 Xiaomi kenzo）**：反复建删 netns 时内核会把引用泄漏到垂死 netns 的 `lo` 上，随后 `cleanup_net` 永远自旋在 `unregister_netdevice: waiting for lo to become free. Usage count = 5` 并持有 `rtnl_mutex`——此后所有 `podman run/start` 乃至 `ip addr` 都 D 态卡死，只有重启能恢复。kenzo 的 3.10.73 上完整测试套件 3/3 复现（约 80-100 分钟处，总在容器 teardown 之后）；隔离复现循环（裸 netns、tap+DAD、pasta+v6）均不触发。引用泄漏源于 netns 存活期的流量/addrconf，上游修复落在 3.10.107/108，kenzo 内核版本低于此。长驻容器几乎不走 netns 销毁路径，但任何高频起停场景（CI、测试套件）都会致命。用户态缓解（关 DAD、teardown 前清 lo 地址）已实测无效。
 
 ## 目录结构
 

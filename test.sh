@@ -44,7 +44,10 @@ waitfor() { # waitfor <secs> <sh-cmd>
 }
 tw() { if waitfor $(( $3 * SCALE )) "$2"; then ok "$1"; else bad "$1"; fi; } # tw <name> <cmd> <secs>
 cleanup() {
-  for c in $(podman ps -aq --filter "name=$P" 2>/dev/null); do podman rm -f "$c" >/dev/null 2>&1; done
+  # kill (SIGKILL) before rm -f: a PID-1 sleep installs no signal handlers, so
+  # the kernel drops SIGTERM and each rm would otherwise eat the full 10s
+  # stop timeout
+  for c in $(podman ps -aq --filter "name=$P" 2>/dev/null); do podman kill "$c" >/dev/null 2>&1; podman rm -f "$c" >/dev/null 2>&1; done
   podman pod rm -f "$P-pod" >/dev/null 2>&1
   for n in $(podman network ls -q --filter "name=$P" 2>/dev/null); do podman network rm "$n" >/dev/null 2>&1; done
   rm -rf /tmp/$P-compose

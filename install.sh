@@ -11,11 +11,6 @@ cd "$(dirname "$0")"
 
 MANIFEST=/etc/dockeronandroid.manifest
 
-if [ -d /usr/libexec/podman ]; then LIBEXEC=/usr/libexec/podman
-elif [ -d /usr/lib/podman ]; then LIBEXEC=/usr/lib/podman
-else echo "error: podman libexec dir not found (tried /usr/libexec/podman, /usr/lib/podman)" >&2; exit 1
-fi
-
 is_wrapper() { grep -q DockerOnAndroid "$1" 2>/dev/null; }
 
 pkg_install() {
@@ -26,6 +21,29 @@ pkg_install() {
   else echo "error: no supported package manager (apk/apt-get/dnf/pacman)" >&2; exit 1
   fi
 }
+
+if ! command -v podman >/dev/null 2>&1; then
+  echo "> installing podman stack (podman + netavark + aardvark-dns)"
+  pkg_install podman netavark aardvark-dns
+fi
+
+# python3 powers the podman binary patches and the podman_compose probe below
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "> installing python3 (required by the podman binary patches)"
+  pkg_install python3
+fi
+
+# optional compose support; some distros lack a podman-compose package, so a
+# failure here only disables the compose provider wrapper below
+if ! python3 -c 'import podman_compose' 2>/dev/null; then
+  echo "> installing podman-compose (compose provider for 'docker compose')"
+  pkg_install podman-compose || echo "warn: podman-compose unavailable; compose support disabled" >&2
+fi
+
+if [ -d /usr/libexec/podman ]; then LIBEXEC=/usr/libexec/podman
+elif [ -d /usr/lib/podman ]; then LIBEXEC=/usr/lib/podman
+else echo "error: podman libexec dir not found (tried /usr/libexec/podman, /usr/lib/podman)" >&2; exit 1
+fi
 
 if ! command -v jq >/dev/null 2>&1; then
   echo "> installing jq (required by the netavark shim / crun-nomq)"

@@ -9,6 +9,9 @@ cd "$(dirname "$0")"
 # shellcheck source=/dev/null
 . ./config.env
 
+# pre-INET_GID config.env: default to the historical unconditional 3003
+INET_GID=${INET_GID-3003}
+
 MANIFEST=/etc/dockeronandroid.manifest
 
 is_wrapper() { grep -q DockerOnAndroid "$1" 2>/dev/null; }
@@ -104,7 +107,11 @@ if [ "$FOV_PATCH" = 1 ] && [ ! -f rootfs/usr/bin/fuse-overlayfs-doa ]; then
 fi
 reconcile /usr/bin/podman "$PODMAN_WRAPPER" rootfs/usr/bin/podman
 reconcile /usr/bin/conmon 1 rootfs/usr/bin/conmon
-reconcile "$LIBEXEC/netavark" 1 rootfs/usr/libexec/podman/netavark
+# the shim is generated, not shipped: @INET_GID@ follows the paranoid-network
+# probe (tun chgrp + pasta --runas are skipped where the check is absent)
+sed "s/@INET_GID@/$INET_GID/g" rootfs/usr/libexec/podman/netavark > /.doa-conf.tmp
+reconcile "$LIBEXEC/netavark" 1 /.doa-conf.tmp
+rm -f /.doa-conf.tmp
 reconcile /usr/bin/crun "$CRUN_PATCH" rootfs/usr/bin/crun-doa
 reconcile /usr/bin/fuse-overlayfs "$FOV_PATCH" rootfs/usr/bin/fuse-overlayfs-doa
 install_file rootfs/usr/local/bin/pasta /usr/local/bin/pasta
@@ -295,7 +302,7 @@ echo "> etc/containers/storage.conf (driver=$DRIVER$VIA${GRAPHROOT:+ graphroot=$
 mv /.doa-conf.tmp /etc/containers/storage.conf
 FILES="$FILES /etc/containers/containers.conf /etc/containers/storage.conf"
 
-{ echo "WRAPPED=\"${WRAPPED# }\""; echo "FILES=\"${FILES# }\""; } > "$MANIFEST"
+{ echo "WRAPPED=\"${WRAPPED# }\""; echo "FILES=\"${FILES# }\""; echo "INET_GID=$INET_GID"; } > "$MANIFEST"
 echo "> manifest: $MANIFEST"
 
 # storage.conf changes only apply to new podman processes; bounce the API

@@ -9,6 +9,12 @@
 #   is simply absent). buildah polls `crun state` during RUN and tears down
 #   stdio on "stopped", SIGPIPE-killing healthy build steps. Re-check pid
 #   liveness ourselves and correct the verdict.
+# gid the kernel demands for sockets (Android paranoid network), written to
+# the manifest by install.sh per ./configure's probe; default to the
+# historical 3003 when the manifest is absent
+INET_GID=3003
+[ -f /etc/dockeronandroid.manifest ] && . /etc/dockeronandroid.manifest
+
 bundle=
 state_root=/run/crun
 process_file=
@@ -80,7 +86,7 @@ case " $* " in
   *" create "*|*" run "*)
     if [ -n "$bundle" ] && [ -f "$bundle/config.json" ]; then
       tmp=$bundle/config.json.nomq.$$
-      jq -f /usr/local/lib/crun-nomq.jq "$bundle/config.json" > "$tmp" && cat "$tmp" > "$bundle/config.json"
+      jq --arg inetgid "$INET_GID" -f /usr/local/lib/crun-nomq.jq "$bundle/config.json" > "$tmp" && cat "$tmp" > "$bundle/config.json"
       rm -f "$tmp"
       # Android: apt drops to _apt (gid nogroup, supplementary groups wiped),
       # which fails the kernel's aid_inet socket check. Bind-mount an apt
@@ -88,7 +94,7 @@ case " $* " in
       aptconf=/usr/local/share/doa/apt-sandbox.conf
       rootfs=$(jq -r '.root.path // empty' "$bundle/config.json" 2>/dev/null)
       case $rootfs in /*) :;; *) [ -n "$rootfs" ] && rootfs=$bundle/$rootfs;; esac
-      if [ -f "$aptconf" ] && [ -d "$rootfs/etc/apt/apt.conf.d" ]; then
+      if [ -n "$INET_GID" ] && [ -f "$aptconf" ] && [ -d "$rootfs/etc/apt/apt.conf.d" ]; then
         tmp=$bundle/config.json.nomq-apt.$$
         if jq --arg src "$aptconf" '.mounts += [{destination: "/etc/apt/apt.conf.d/zz-doa-sandbox.conf", type: "bind", source: $src, options: ["rbind", "ro"]}]' \
             "$bundle/config.json" > "$tmp"; then
@@ -107,12 +113,12 @@ case " $* " in
       # and no privilege-dropping daemon runs during a build anyway.
       mgr=$(jq -r '.annotations["io.container.manager"] // empty' "$bundle/config.json" 2>/dev/null)
       group=$rootfs/etc/group
-      if [ "$mgr" = libpod ] && [ -f "$group" ] && [ -f "$rootfs/etc/passwd" ] && ! grep -q '^aid_inet:' "$group" 2>/dev/null; then
+      if [ -n "$INET_GID" ] && [ "$mgr" = libpod ] && [ -f "$group" ] && [ -f "$rootfs/etc/passwd" ] && ! grep -q '^aid_inet:' "$group" 2>/dev/null; then
         dogroup=$bundle/group.doa
         { cat "$group"
           users=$(cut -d: -f1 "$rootfs/etc/passwd" | tr '\n' ',' | sed 's/,$//')
-          echo "aid_inet:x:3003:$users"
-          echo "aid_net_raw:x:3004:$users"
+          echo "aid_inet:x:$INET_GID:$users"
+          echo "aid_net_raw:x:$((INET_GID+1)):$users"
         } > "$dogroup" 2>/dev/null
         if [ -s "$dogroup" ]; then
           tmp=$bundle/config.json.nomq-grp.$$

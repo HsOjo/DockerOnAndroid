@@ -212,8 +212,12 @@ nnets=$(printf '%s\n' "$nets" | grep -c .)
 log "setup $cid ($cname) nets=$(printf '%s' "$nets" | tr '\n' ',') nsf=$nsf"
 
 # pasta opens /dev/net/tun with dropped caps (egid aid_inet); Android creates
-# the node 1000:1016 0660, which survives only until reboot
-[ -c /dev/net/tun ] && { chgrp 3003 /dev/net/tun 2>/dev/null; chmod 660 /dev/net/tun 2>/dev/null; }
+# the node 1000:1016 0660, which survives only until reboot. Only needed when
+# configure probed the kernel's paranoid-network check on (INET_GID set).
+if [ -n "@INET_GID@" ] && [ -c /dev/net/tun ]; then
+  chgrp @INET_GID@ /dev/net/tun 2>/dev/null; chmod 660 /dev/net/tun 2>/dev/null
+fi
+runas=; [ -n "@INET_GID@" ] && runas="--runas 0:@INET_GID@"
 
 # buildah hands us a transient /proc/<pid>/fd/<n> netns reference that it
 # closes as soon as setup returns; the pasta launch is asynchronous and would
@@ -476,8 +480,8 @@ start_unit() { # $1=net
   done
   i=0
   while [ "$i" -lt 6 ]; do
-    # shellcheck disable=SC2086 # intentional: ${var:+-a "$var"} word pairs
-    "$PASTA" -f --config-net --runas 0:3003 --chroot-fallback --no-map-gw \
+    # shellcheck disable=SC2086 # intentional: ${var:+...} word pairs, $runas is two words
+    "$PASTA" -f --config-net $runas --chroot-fallback --no-map-gw \
       -T none -U none -I "$ifn" \
       ${dev:+--interface "$dev"} ${cip4:+-a "$cip4"} ${prefix4:+-n "$prefix4"} $gwflag4 \
       ${cip6:+-a "$cip6"} $gwflag6 \

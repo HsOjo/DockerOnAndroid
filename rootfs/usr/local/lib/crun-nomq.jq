@@ -5,4 +5,4 @@
 | (.process.user //= {})
 | (.process.user.uid) = 0
 | (.process.user.gid) = 0
-| (.process.user.additionalGids) = (((($c.process.user.additionalGids // []) + [($c.process.user.gid // 0), 0, 3003, 3004]) | map(select(. != null))) | unique)
+| (.process.user.additionalGids) = (((($c.process.user.additionalGids // []) + [($c.process.user.gid // 0), 0] + (if $inetgid == "" then [] else [($inetgid | tonumber), (($inetgid | tonumber) + 1)] end)) | map(select(. != null))) | unique)

@@ -183,11 +183,18 @@ EOF
   # exec.fifo"; the DoA compose provider rewrites it to attach (which blocks
   # streaming, hence the timeout)
   if command -v timeout >/dev/null 2>&1; then
-    out=$(cd /tmp/$P-compose && timeout 30 podman compose -p $P up 2>&1); rc=$?
-    case $out in
-      *exec.fifo*) bad "compose: attached re-up on running containers" ;;
-      *) [ "$rc" = 124 ] && ok "compose: attached re-up on running containers" || bad "compose: attached re-up on running containers (rc=$rc)" ;;
-    esac
+    # no command substitution: a surviving `podman attach` would hold the
+    # pipe open and hang the test even after timeout kills its child; -k
+    # because a job-control-stopped child never processes the pending TERM
+    (cd /tmp/$P-compose && timeout -k 5 30 podman compose -p $P up > up.out 2>&1); rc=$?
+    pkill -f "podman attach ${P}_web_1" 2>/dev/null || true
+    if grep -q exec.fifo /tmp/$P-compose/up.out; then
+      bad "compose: attached re-up on running containers"
+    elif [ "$rc" = 124 ] || [ "$rc" = 137 ]; then
+      ok "compose: attached re-up on running containers"
+    else
+      bad "compose: attached re-up on running containers (rc=$rc)"
+    fi
   fi
   (cd /tmp/$P-compose && podman-compose -p $P down >/dev/null 2>&1)
 fi

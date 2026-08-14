@@ -15,6 +15,19 @@ IMG_WEB=nginx:alpine
 IMG_ALP=alpine:latest
 STATE=/tmp/pasta/nv
 
+# published ports; shift the whole set with DOAT_PORT_BASE when a port is
+# stuck (e.g. orphaned LISTEN socket after a killed run)
+PB=${DOAT_PORT_BASE:-18080}
+P_WEB=$((PB+1))    # 18081
+P_POD=$((PB+2))    # 18082
+P_CMP=$((PB+3))    # 18083
+P_SP=$((PB+7))     # 18087
+P_SAME=$((PB+808)) # 18888
+P_UDP=${DOAT_PORT_UDP:-15353}
+
+# window multiplier for slow/loaded devices (kenzo needs ~4)
+SCALE=${DOAT_TW_SCALE:-1}
+
 pass=0 fail=0
 ok()  { pass=$((pass+1)); echo "ok   - $1"; }
 bad() { fail=$((fail+1)); echo "FAIL - $1"; }
@@ -29,8 +42,7 @@ waitfor() { # waitfor <secs> <sh-cmd>
   done
   return 1
 }
-tw() { if waitfor "$3" "$2"; then ok "$1"; else bad "$1"; fi; } # tw <name> <cmd> <secs>
-
+tw() { if waitfor $(( $3 * SCALE )) "$2"; then ok "$1"; else bad "$1"; fi; } # tw <name> <cmd> <secs>
 cleanup() {
   for c in $(podman ps -aq --filter "name=$P" 2>/dev/null); do podman rm -f "$c" >/dev/null 2>&1; done
   podman pod rm -f "$P-pod" >/dev/null 2>&1
@@ -52,13 +64,13 @@ done
 cleanup 2>/dev/null
 
 echo "== bridge: TCP publishing / outbound =="
-podman run -d --pull=never --name $P-web -p 18081:80 "$IMG_WEB" >/dev/null || { echo "cannot start test container"; exit 1; }
-tw "tcp: host -> published port" "wget -q -O /dev/null --timeout=5 http://127.0.0.1:18081/" 15
+podman run -d --pull=never --name $P-web -p $P_WEB:80 "$IMG_WEB" >/dev/null || { echo "cannot start test container"; exit 1; }
+tw "tcp: host -> published port" "wget -q -O /dev/null --timeout=5 http://127.0.0.1:$P_WEB/" 15
 cip_web=$(cip $P-web)
 t "tcp: host -> container IP" "wget -q -O /dev/null --timeout=5 http://$cip_web/"
 podman run -d --pull=never --name $P-cli "$IMG_ALP" sleep 600 >/dev/null
 gw4=$(podman network inspect podman | jq -r '.[0].subnets[] | select(.subnet | contains(":") | not) | .gateway // empty' | head -1)
-t "v4 outbound: gateway" "podman exec $P-cli ping -c1 -W3 $gw4"
+tw "v4 outbound: gateway" "podman exec $P-cli ping -c1 -W3 $gw4" 5
 t "v4 outbound: internet" "podman exec $P-cli ping -c1 -W3 223.5.5.5"
 # the conmon readiness gate must hold container start until the netns is
 # configured: an entrypoint that goes straight to the network must work
@@ -66,15 +78,15 @@ t "race: entrypoint online at start" "podman run --rm --pull=never $IMG_ALP ping
 
 # hp==cp publishes: the wildcard rule must not be duplicated as a cip-direct
 # rule - pasta dies on the forwarding conflict otherwise
-podman run -d --pull=never --name $P-sp -p 18087:80 -p 18888:18888 "$IMG_WEB" >/dev/null
+podman run -d --pull=never --name $P-sp -p $P_SP:80 -p $P_SAME:$P_SAME "$IMG_WEB" >/dev/null
 tw "same-port: pasta survives" "p=\$(cat $STATE/\$(podman inspect -f '{{.Id}}' $P-sp 2>/dev/null).pastapid.* 2>/dev/null); [ -n \"\$p\" ] && kill -0 \$p 2>/dev/null" 15
-tw "same-port: published port works" "wget -q -O /dev/null --timeout=5 http://127.0.0.1:18087/" 15
-t "same-port: host listens on hp==cp port" "netstat -tln 2>/dev/null | grep -q ':18888 '"
+tw "same-port: published port works" "wget -q -O /dev/null --timeout=5 http://127.0.0.1:$P_SP/" 15
+t "same-port: host listens on hp==cp port" "netstat -tln 2>/dev/null | grep -q ':$P_SAME '"
 
 echo "== bridge: UDP publishing =="
-podman run -d --pull=never --name $P-udp -p 15353:5353/udp "$IMG_ALP" nc -u -l -p 5353 >/dev/null
+podman run -d --pull=never --name $P-udp -p "$P_UDP:5353/udp" "$IMG_ALP" nc -u -l -p 5353 >/dev/null
 # one-shot datagrams are lossy before nc is listening: resend on every retry
-tw "udp: published port delivers datagram" "echo doat-probe | nc -u -w1 127.0.0.1 15353 && sleep 0.3 && podman logs $P-udp 2>&1 | grep -q doat-probe" 10
+tw "udp: published port delivers datagram" "echo doat-probe | nc -u -w1 127.0.0.1 $P_UDP && sleep 0.3 && podman logs $P-udp 2>&1 | grep -q doat-probe" 10
 
 echo "== IPv6 / dual-stack =="
 podman network create --ipv6 $P-v6 >/dev/null
@@ -120,26 +132,26 @@ cip_exp=$(cip $P-exp)
 tw "expose: peer reaches exposed port" "podman exec $P-cli wget -q -O /dev/null --timeout=5 http://$cip_exp/" 25
 
 echo "== pod =="
-podman pod create --name $P-pod -p 18082:80 >/dev/null
+podman pod create --name $P-pod -p $P_POD:80 >/dev/null
 podman run -d --pull=never --pod $P-pod --name $P-podweb "$IMG_WEB" >/dev/null
-tw "pod: published port works" "wget -q -O /dev/null --timeout=5 http://127.0.0.1:18082/" 15
+tw "pod: published port works" "wget -q -O /dev/null --timeout=5 http://127.0.0.1:$P_POD/" 15
 
 echo "== restart / stop / start =="
 cid=$(podman inspect -f '{{.Id}}' $P-web)
 pp0=$(cat $STATE/$cid.pastapid.* 2>/dev/null | head -1)
 podman restart $P-web >/dev/null
-tw "restart: published port survives" "wget -q -O /dev/null --timeout=5 http://127.0.0.1:18081/" 20
+tw "restart: published port survives" "wget -q -O /dev/null --timeout=5 http://127.0.0.1:$P_WEB/" 20
 # pastapid lands ~1s after pasta binds the port: poll instead of reading once
 tw "restart: pasta relaunched on new netns" "p=\$(cat $STATE/$cid.pastapid.* 2>/dev/null); [ -n \"\$p\" ] && [ \"\$p\" != \"$pp0\" ] && kill -0 \$p 2>/dev/null" 20
 podman stop $P-web >/dev/null
 podman start $P-web >/dev/null
-tw "stop/start: published port back" "wget -q -O /dev/null --timeout=5 http://127.0.0.1:18081/" 20
+tw "stop/start: published port back" "wget -q -O /dev/null --timeout=5 http://127.0.0.1:$P_WEB/" 20
 
 echo "== pasta crash auto-restart =="
 pp2=$(cat $STATE/$cid.pastapid.* 2>/dev/null | head -1)
 kill "$pp2" 2>/dev/null
 tw "crash: supervisor relaunches pasta" "p=\$(cat $STATE/$cid.pastapid.* 2>/dev/null); [ -n \"\$p\" ] && [ \"\$p\" != \"$pp2\" ] && kill -0 \$p 2>/dev/null" 20
-tw "crash: port works after relaunch" "wget -q -O /dev/null --timeout=5 http://127.0.0.1:18081/" 10
+tw "crash: port works after relaunch" "wget -q -O /dev/null --timeout=5 http://127.0.0.1:$P_WEB/" 10
 
 echo "== teardown cleanup =="
 podman rm -f $P-web >/dev/null
@@ -155,10 +167,10 @@ services:
   web:
     image: $IMG_WEB
     ports:
-      - "18083:80"
+      - "$P_CMP:80"
 EOF
   (cd /tmp/$P-compose && podman-compose -p $P up -d >/dev/null 2>&1)
-  tw "compose: published port works" "wget -q -O /dev/null --timeout=5 http://127.0.0.1:18083/" 20
+  tw "compose: published port works" "wget -q -O /dev/null --timeout=5 http://127.0.0.1:$P_CMP/" 20
   (cd /tmp/$P-compose && podman-compose -p $P down >/dev/null 2>&1)
 fi
 

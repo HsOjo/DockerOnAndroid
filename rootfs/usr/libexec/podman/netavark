@@ -217,7 +217,10 @@ log "setup $cid ($cname) nets=$(printf '%s' "$nets" | tr '\n' ',') nsf=$nsf"
 if [ -n "@INET_GID@" ] && [ -c /dev/net/tun ]; then
   chgrp @INET_GID@ /dev/net/tun 2>/dev/null; chmod 660 /dev/net/tun 2>/dev/null
 fi
-runas=; [ -n "@INET_GID@" ] && runas="--runas 0:@INET_GID@"
+# always pin uid 0 via --runas: pasta's default drop-to-nobody path fails to
+# build its sandbox namespaces on these kernels ("Couldn't switch to pasta
+# namespaces"); only the egid follows the probe (0 when unneeded)
+runas="--runas 0:@INET_GID_OR_0@"
 
 # buildah hands us a transient /proc/<pid>/fd/<n> netns reference that it
 # closes as soon as setup returns; the pasta launch is asynchronous and would

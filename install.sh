@@ -108,8 +108,10 @@ fi
 reconcile /usr/bin/podman "$PODMAN_WRAPPER" rootfs/usr/bin/podman
 reconcile /usr/bin/conmon 1 rootfs/usr/bin/conmon
 # the shim is generated, not shipped: @INET_GID@ follows the paranoid-network
-# probe (tun chgrp + pasta --runas are skipped where the check is absent)
-sed "s/@INET_GID@/$INET_GID/g" rootfs/usr/libexec/podman/netavark > /.doa-conf.tmp
+# probe (tun chgrp is skipped where the check is absent; pasta --runas always
+# pins uid 0, egid falls back to 0)
+sed -e "s/@INET_GID_OR_0@/${INET_GID:-0}/g" -e "s/@INET_GID@/$INET_GID/g" \
+    rootfs/usr/libexec/podman/netavark > /.doa-conf.tmp
 reconcile "$LIBEXEC/netavark" 1 /.doa-conf.tmp
 rm -f /.doa-conf.tmp
 reconcile /usr/bin/crun "$CRUN_PATCH" rootfs/usr/bin/crun-doa

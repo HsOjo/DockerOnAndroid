@@ -38,6 +38,7 @@ for f in /usr/local/bin/pasta /usr/local/bin/crun-nomq /usr/local/lib/crun-nomq.
          /usr/local/bin/doa-healthcheckd /usr/local/bin/podman-compose-doa \
          /etc/network/interfaces \
          /etc/modules-load.d/tun.conf \
+         /etc/modules-load.d/doa-native-net.conf \
          /etc/containers/containers.conf /etc/containers/storage.conf; do
   case $f in
     /etc/*)

@@ -9,8 +9,9 @@ cd "$(dirname "$0")"
 # shellcheck source=/dev/null
 . ./config.env
 
-# pre-INET_GID config.env: default to the historical unconditional 3003
+# pre-INET_GID/NET_BACKEND config.env: default to the historical behavior
 INET_GID=${INET_GID-3003}
+NET_BACKEND=${NET_BACKEND:-pasta}
 
 MANIFEST=/etc/dockeronandroid.manifest
 
@@ -98,7 +99,16 @@ FILES=""
 # silence podman-docker's "Emulate Docker CLI" banner on every docker call
 touch /etc/containers/nodocker
 FILES="$FILES /etc/containers/nodocker"
-[ -f rootfs/usr/local/bin/pasta ] || ./build-pasta.sh
+
+# pasta backend (Android-class kernels) vs native bridge (capable kernels):
+# the netavark/conmon wrappers, pasta binary and tun persistence are only
+# deployed for pasta; native restores the pristine binaries instead
+pasta_want=1
+[ "$NET_BACKEND" = pasta ] || pasta_want=0
+
+if [ "$pasta_want" = 1 ]; then
+  [ -f rootfs/usr/local/bin/pasta ] || ./build-pasta.sh
+fi
 if [ "$CRUN_PATCH" = 1 ] && [ ! -f rootfs/usr/bin/crun-doa ]; then
   ./build-crun.sh
 fi
@@ -106,19 +116,24 @@ if [ "$FOV_PATCH" = 1 ] && [ ! -f rootfs/usr/bin/fuse-overlayfs-doa ]; then
   ./build-fuse-overlayfs.sh
 fi
 reconcile /usr/bin/podman "$PODMAN_WRAPPER" rootfs/usr/bin/podman
-reconcile /usr/bin/conmon 1 rootfs/usr/bin/conmon
-# the shim is generated, not shipped: @INET_GID@ follows the paranoid-network
-# probe (tun chgrp is skipped where the check is absent; pasta --runas always
-# pins uid 0, egid falls back to 0)
-sed -e "s/@INET_GID_OR_0@/${INET_GID:-0}/g" -e "s/@INET_GID@/$INET_GID/g" \
-    rootfs/usr/libexec/podman/netavark > /.doa-conf.tmp
-reconcile "$LIBEXEC/netavark" 1 /.doa-conf.tmp
-rm -f /.doa-conf.tmp
+reconcile /usr/bin/conmon "$pasta_want" rootfs/usr/bin/conmon
+if [ "$pasta_want" = 1 ]; then
+  # the shim is generated, not shipped: @INET_GID@ follows the paranoid-network
+  # probe (tun chgrp is skipped where the check is absent; pasta --runas always
+  # pins uid 0, egid falls back to 0)
+  sed -e "s/@INET_GID_OR_0@/${INET_GID:-0}/g" -e "s/@INET_GID@/$INET_GID/g" \
+      rootfs/usr/libexec/podman/netavark > /.doa-conf.tmp
+  reconcile "$LIBEXEC/netavark" 1 /.doa-conf.tmp
+  rm -f /.doa-conf.tmp
+  install_file rootfs/usr/local/bin/pasta /usr/local/bin/pasta
+  chmod 755 /usr/local/bin/pasta
+  FILES="$FILES /usr/local/bin/pasta"
+else
+  reconcile "$LIBEXEC/netavark" 0 ""
+  rm -f /usr/local/bin/pasta
+fi
 reconcile /usr/bin/crun "$CRUN_PATCH" rootfs/usr/bin/crun-doa
 reconcile /usr/bin/fuse-overlayfs "$FOV_PATCH" rootfs/usr/bin/fuse-overlayfs-doa
-install_file rootfs/usr/local/bin/pasta /usr/local/bin/pasta
-chmod 755 /usr/local/bin/pasta
-FILES="$FILES /usr/local/bin/pasta"
 
 if [ "$CRUN_NOMQ" = 1 ]; then
   install_file rootfs/usr/local/bin/crun-nomq /usr/local/bin/crun-nomq
@@ -159,16 +174,27 @@ else
   else rm -f /etc/network/interfaces; fi
 fi
 
-# pasta needs /dev/net/tun inside the container netns; load tun now and
-# persist it (modules-load.d is honored by systemd and openrc's modules
-# service alike) so port publishing survives reboots
-[ -c /dev/net/tun ] || modprobe tun 2>/dev/null || true
-if [ ! -c /dev/net/tun ]; then
-  echo "warn: no /dev/net/tun (kernel TUN unavailable); pasta cannot give containers networking" >&2
-elif ! grep -qs '^tun$' /etc/modules-load.d/tun.conf /etc/modules 2>/dev/null; then
+# kernel modules per backend: pasta needs /dev/net/tun inside the container
+# netns; native bridge needs veth+bridge+nft NAT. Persist via modules-load.d
+# (honored by systemd and openrc's modules service alike) so networking
+# survives reboots.
+if [ "$pasta_want" = 1 ]; then
+  grep -q DockerOnAndroid /etc/modules-load.d/doa-native-net.conf 2>/dev/null && rm -f /etc/modules-load.d/doa-native-net.conf
+  [ -c /dev/net/tun ] || modprobe tun 2>/dev/null || true
+  if [ ! -c /dev/net/tun ]; then
+    echo "warn: no /dev/net/tun (kernel TUN unavailable); pasta cannot give containers networking" >&2
+  elif ! grep -qs '^tun$' /etc/modules-load.d/tun.conf /etc/modules 2>/dev/null; then
+    mkdir -p /etc/modules-load.d
+    install_file rootfs/etc/modules-load.d/tun.conf /etc/modules-load.d/tun.conf
+    FILES="$FILES /etc/modules-load.d/tun.conf"
+  fi
+else
+  grep -q DockerOnAndroid /etc/modules-load.d/tun.conf 2>/dev/null && rm -f /etc/modules-load.d/tun.conf
+  modprobe bridge 2>/dev/null; modprobe veth 2>/dev/null
+  modprobe nf_tables 2>/dev/null; modprobe nf_nat 2>/dev/null
   mkdir -p /etc/modules-load.d
-  install_file rootfs/etc/modules-load.d/tun.conf /etc/modules-load.d/tun.conf
-  FILES="$FILES /etc/modules-load.d/tun.conf"
+  install_file rootfs/etc/modules-load.d/doa-native-net.conf /etc/modules-load.d/doa-native-net.conf
+  FILES="$FILES /etc/modules-load.d/doa-native-net.conf"
 fi
 
 if [ "$CGROUP_FIX" = 1 ]; then
@@ -304,7 +330,7 @@ echo "> etc/containers/storage.conf (driver=$DRIVER$VIA${GRAPHROOT:+ graphroot=$
 mv /.doa-conf.tmp /etc/containers/storage.conf
 FILES="$FILES /etc/containers/containers.conf /etc/containers/storage.conf"
 
-{ echo "WRAPPED=\"${WRAPPED# }\""; echo "FILES=\"${FILES# }\""; echo "INET_GID=$INET_GID"; } > "$MANIFEST"
+{ echo "WRAPPED=\"${WRAPPED# }\""; echo "FILES=\"${FILES# }\""; echo "INET_GID=$INET_GID"; echo "NET_BACKEND=$NET_BACKEND"; } > "$MANIFEST"
 echo "> manifest: $MANIFEST"
 
 # storage.conf changes only apply to new podman processes; bounce the API

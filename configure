@@ -57,6 +57,14 @@ fi
 # memory controller compiled in? crun kill --all hardcodes /sys/fs/cgroup/memory
 memcg=0; grep -q '^memory' /proc/cgroups && memcg=1
 
+# hybrid kernels: the v2 root may lack pids while v1 has it; crun hard-fails
+# writing pids.max against cgroup.controllers there
+pids_v2=1
+if [ -f /sys/fs/cgroup/cgroup.controllers ] && ! grep -qw pids /sys/fs/cgroup/cgroup.controllers \
+   && grep -q '^pids' /proc/cgroups; then
+  pids_v2=0
+fi
+
 # cpuset writable? Android 3.x kernels pin the root cpuset (0-N) and refuse
 # child writes (EINVAL), which is fatal to upstream crun
 cpuset_ok=1
@@ -70,23 +78,54 @@ if [ -f /sys/fs/cgroup/cpuset/cpuset.cpus ]; then
 fi
 
 crun_patch=0
-{ [ "$memcg" = 0 ] || [ "$cpuset_ok" = 0 ]; } && crun_patch=1
+{ [ "$memcg" = 0 ] || [ "$cpuset_ok" = 0 ] || [ "$pids_v2" = 0 ]; } && crun_patch=1
+
+# native bridge networking: usable when the kernel can do veth+bridge+nft NAT.
+# Probe empirically by having netavark itself set up a throwaway netns — the
+# exact component and code path production containers would use. Falls back
+# to the pasta shim (works with just NET_NS+TUN) when anything is missing.
+net_backend=pasta
+nv=
+for d in /usr/libexec/podman /usr/lib/podman; do
+  # prefer the pristine binary: netavark may already be the DoA wrapper
+  [ -f "$d/netavark.real" ] && { nv=$d/netavark.real; break; }
+  [ -z "$nv" ] && [ -f "$d/netavark" ] && ! grep -q DockerOnAndroid "$d/netavark" 2>/dev/null && nv=$d/netavark
+done
+if [ -n "$nv" ] && command -v unshare >/dev/null 2>&1; then
+  modprobe bridge veth nf_tables nf_nat 2>/dev/null
+  NP=/tmp/doa-cfg/netprobe
+  rm -rf "$NP"; mkdir -p "$NP"
+  cat > "$NP/doaprobe.json" <<'EOF'
+{"container_id":"doaprobe","container_name":"doaprobe","port_mappings":[],"networks":{"doaprobe":{"static_ips":["10.250.0.2"],"interface_name":"eth0"}},"network_info":{"doaprobe":{"name":"doaprobe","id":"doaprobe0","driver":"bridge","network_interface":"doaprobe0","subnets":[{"subnet":"10.250.0.0/24","gateway":"10.250.0.1"}],"ipv6_enabled":false,"internal":false,"dns_enabled":false}}}
+EOF
+  unshare -n sleep 20 & np_pid=$!
+  sleep 1
+  if "$nv" --config "$NP" setup "/proc/$np_pid/ns/net" < "$NP/doaprobe.json" 2>/dev/null | grep -q '"eth0"'; then
+    net_backend=native
+  fi
+  "$nv" --config "$NP" teardown "/proc/$np_pid/ns/net" < "$NP/doaprobe.json" >/dev/null 2>&1
+  kill "$np_pid" 2>/dev/null
+  rm -rf "$NP"
+fi
 
 # small default TCP send buffer: pasta's fallback path advertises the host
 # socket's SO_SNDBUF as the guest-side window. The 16K default on 3.x
 # kernels makes every guest burst hit a partial sendmsg(); the unsent tail
 # is dropped and the guest (no SACK toward pasta, 200ms min RTO) collapses
 # into RTO backoff - published ports crawl at KB/s. A >= 256K default keeps
-# window < buffer so partial sends don't happen (rootfs/etc/sysctl.d conf)
+# window < buffer so partial sends don't happen (rootfs/etc/sysctl.d conf).
+# pasta-only: native bridge traffic never traverses a host socket.
 wmem_fix=0
-# shellcheck disable=SC2046 # intentional: split tcp_wmem's three fields
-set -- $(cat /proc/sys/net/ipv4/tcp_wmem 2>/dev/null)
-if [ -e /etc/sysctl.d/90-doa-tcp-wmem.conf ]; then
-  # our own conf already raised the running value; without it the next boot
-  # would be back to the small default, so it must not flip this probe off
-  wmem_fix=1
-elif [ -n "$2" ] && [ "$2" -lt 262144 ] 2>/dev/null; then
-  wmem_fix=1
+if [ "$net_backend" = pasta ]; then
+  # shellcheck disable=SC2046 # intentional: split tcp_wmem's three fields
+  set -- $(cat /proc/sys/net/ipv4/tcp_wmem 2>/dev/null)
+  if [ -e /etc/sysctl.d/90-doa-tcp-wmem.conf ]; then
+    # our own conf already raised the running value; without it the next boot
+    # would be back to the small default, so it must not flip this probe off
+    wmem_fix=1
+  elif [ -n "$2" ] && [ "$2" -lt 262144 ] 2>/dev/null; then
+    wmem_fix=1
+  fi
 fi
 
 # graphroot: opt in via GRAPHROOT=... ./configure (e.g. when /var/lib is a
@@ -134,13 +173,14 @@ TS_FIX=$ts_fix
 CRUN_PATCH=$crun_patch
 FOV_PATCH=$fov_patch
 WMEM_FIX=$wmem_fix
+NET_BACKEND=$net_backend
 INET_GID=$inet_gid
 GRAPHROOT=$graphroot
 EOF
 
-echo "probes:   userns=$ns_user ipcns=$ns_ipc pidns=$ns_pid utsns=$ns_uts overlayfs=$([ "$storage" = overlay ] && echo 1 || echo 0) lo_ok=$((1-lo_fix)) cgroup_ok=$((1-cgroup_fix)) thread_self=$((1-ts_fix)) memcg=$memcg cpuset_ok=$cpuset_ok inet_gid=${inet_gid:-none}"
-echo "config:   storage=$storage podman_wrapper=$podman_wrapper crun_nomq=$crun_nomq crun_patch=$crun_patch fov_patch=$fov_patch ts_fix=$ts_fix"
-[ ! -f rootfs/usr/local/bin/pasta ] && \
+echo "probes:   userns=$ns_user ipcns=$ns_ipc pidns=$ns_pid utsns=$ns_uts overlayfs=$([ "$storage" = overlay ] && echo 1 || echo 0) lo_ok=$((1-lo_fix)) cgroup_ok=$((1-cgroup_fix)) thread_self=$((1-ts_fix)) memcg=$memcg cpuset_ok=$cpuset_ok pids_v2=$pids_v2 inet_gid=${inet_gid:-none}"
+echo "config:   storage=$storage backend=$net_backend podman_wrapper=$podman_wrapper crun_nomq=$crun_nomq crun_patch=$crun_patch fov_patch=$fov_patch ts_fix=$ts_fix"
+[ "$net_backend" = pasta ] && [ ! -f rootfs/usr/local/bin/pasta ] && \
   echo "note:     no pasta binary yet; run ./build-pasta.sh before ./install.sh"
 [ "$crun_patch" = 1 ] && [ ! -f rootfs/usr/bin/crun-doa ] && \
   echo "note:     kernel cgroup support is broken; run ./build-crun.sh before ./install.sh"

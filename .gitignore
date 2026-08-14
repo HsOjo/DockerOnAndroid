@@ -1,6 +1,7 @@
 .DS_Store
 /passt-src/
 /crun-src/
+/fuse-overlayfs-src/
 /rootfs/usr/local/bin/pasta
 /rootfs/usr/bin/crun-doa
 /config.env

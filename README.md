@@ -154,12 +154,15 @@ Note on podman **>= 5.5**: pod infra containers switched to rootfs-overlay, whic
 - **EXPOSE connectivity relies on an asynchronous inspect** (querying the container's own config right after start); under extreme timing the first rule may arrive seconds late.
 - **Startup network race on containers with published ports**: podman holds the port reservations until the container starts, so pasta can only bind in the background — an entrypoint that hits the network instantly may catch a sub-second window. Containers without published ports are gated on netns readiness by the conmon wrapper and are not affected.
 - **Version-bound**: the wrappers depend on podman's netavark plugin protocol and conmon argument format; only the versions listed under [Compatibility](#compatibility) are validated. A podman package upgrade also overwrites the wrappers — see [Upgrading podman](#upgrading-podman).
+- **fuse-overlayfs mount loss makes container removal stickily fail (auto-recovered)**: if a container starts while its `merged` dir is not actually mounted (stale "mounted" storage metadata after a crash or unclean reboot — upstream [podman#23504](https://github.com/containers/podman/issues/23504), unfixed), podman writes its per-container config (`etc/hosts`, `resolv.conf`, `hostname`, `run/.containerenv`, plus empty skeleton dirs) into the *plain* dir, and every later `rm` / `compose down` dies at `replacing mount point ".../merged": directory not empty` — retrying is futile and the storage container leaks into `podman ps --storage`. The podman wrapper's `rm`/`stop` auto-cleans when the dir holds *only* those known podman-generated files (podman-compose is covered too — it shells out to the podman CLI); any other file means real container data written while the overlay was lost, which is preserved and reported with manual recovery steps. When this fires, capture `ps aux | grep fuse-overlayfs`, the merged dir listing and `/proc/mounts` first — the open question is what killed the FUSE daemon (suspect: Android LMK under load).
+- **doa-tsd death breaks all container starts**: the thread-self FUSE shim is a single python process; if it dies, every container start fails with `failed to bind mount ns at /run/netns/...: transport endpoint is not connected`. Recover with `rc-service doa-tsd restart`.
 
 ## Layout
 
 ```
 rootfs/
-  usr/bin/podman              # wrapper: userns warning filter + env injection
+  usr/bin/podman              # wrapper: userns warning filter, env injection,
+                              #  rm/stop EBUSY retry + ENOTEMPTY auto-recovery
   usr/bin/conmon              # wrapper: release LISTEN fds + trigger launch script
   usr/libexec/podman/netavark # core shim: bridge lifecycle / aardvark / policy routing
                               # (installed to /usr/lib/podman on Debian-likes)
@@ -185,6 +188,7 @@ patches/crun/android-cgroup.patch
 - Every podman invocation on the device takes a global sqlite lock; **never call podman recursively inside the shim** (inspect in the setup path deadlocks) — container config can only be read asynchronously by the conmon wrapper after the container starts.
 - Image storage driver is kernel `overlay` when available, else `overlay` via `fuse-overlayfs`, else `vfs`; database backend is `sqlite` (boltdb's mmap misbehaves on this kernel). With `vfs` every layer and every build step is a full-tree copy — unbearable beyond toy images. Switching drivers requires wiping `/var/lib/containers/storage` (install.sh warns).
 - Build performance: containers/storage probes the kernel once per process for native diff support and falls back to *naive diff* on failure — on Android the probe fails (with kernel overlayfs, and always when a `mount_program` like fuse-overlayfs is set), so each build-step commit walks both the parent and the current tree instead of just reading the overlay upperdir. DoA binary-patches podman (`patches/podman/naive-diff.py`, install-time) to no-op the probe, so native diff is always used; fuse-overlayfs whiteouts are kernel-compatible and a 3×30 MB build drops from ~25 s to ~14 s. `podman build --squash` remains available to skip intermediate image-layer commits entirely.
+- Repro of the sticky ENOTEMPTY corruption (see Known limitations): `mid=$(podman inspect <c> | jq -r '.[0].GraphDriver.Data.MergedDir'); umount -l "$mid"; podman restart <c>` — libpod populates the plain merged dir, and `podman rm -f <c>` then exercises the wrapper's auto-recovery (plant any extra file in `$mid` first to verify it refuses).
 - busybox environment: no `grep -P`, no `PIPESTATUS`; scripts stay POSIX.
 
 ## License

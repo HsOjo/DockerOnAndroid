@@ -150,12 +150,15 @@ cp /usr/libexec/podman/netavark /usr/libexec/podman/netavark.real   # Debian 系
 - **EXPOSE 互联依赖异步 inspect**（容器启动后瞬时查询自身配置），极端时序下首条规则可能晚到数秒。
 - **有发布端口的容器存在启动用网竞态**：podman 持有端口预留直到容器启动，pasta 只能在后台重试绑定——entrypoint 启动即用网可能赶上亚秒级窗口。无发布端口的容器由 conmon 就绪门控保证，不受影响。
 - **版本绑定**：wrapper 依赖 podman 的 netavark 插件协议与 conmon 参数格式，仅[兼容性](#兼容性)中列出的版本经过验证。podman 包升级还会覆盖 wrapper——见[升级 podman](#升级-podman)。
+- **fuse-overlayfs 挂载丢失会让容器删除粘死（已自动恢复）**：若容器启动时其 `merged` 目录实际并未挂载（崩溃/非干净关机后存储元数据残留"已挂载"——上游 [podman#23504](https://github.com/containers/podman/issues/23504)，未修复），podman 会把容器配置文件（`etc/hosts`、`resolv.conf`、`hostname`、`run/.containerenv` 及空骨架目录）写进*普通目录*；此后每次 `rm` / `compose down` 都会死于 `replacing mount point ".../merged": directory not empty`，重试无效，storage 层容器泄漏进 `podman ps --storage`。podman wrapper 的 `rm`/`stop` 在目录*只含*上述已知 podman 生成文件时自动清理重试（podman-compose 也覆盖——它 shell 调 podman CLI）；出现任何其他文件意味着 overlay 丢失期间写入了真实容器数据，wrapper 会保留并给出人工恢复步骤。触发时请先用 `ps aux | grep fuse-overlayfs`、merged 目录列表和 `/proc/mounts` 取证——未解之谜是谁杀了 FUSE daemon（嫌疑：高负载下 Android LMK）。
+- **doa-tsd 死亡会导致所有容器无法启动**：thread-self FUSE shim 是单个 python 进程；一旦死亡，每次容器启动都报 `failed to bind mount ns at /run/netns/...: transport endpoint is not connected`。用 `rc-service doa-tsd restart` 恢复。
 
 ## 目录结构
 
 ```
 rootfs/
-  usr/bin/podman              # wrapper: 过滤 userns 告警 + 环境注入
+  usr/bin/podman              # wrapper: 过滤 userns 告警 + 环境注入,
+                              #  rm/stop EBUSY 重试 + ENOTEMPTY 自动恢复
   usr/bin/conmon              # wrapper: 释放 LISTEN fd + 触发容器启动脚本
   usr/libexec/podman/netavark # 核心 shim: bridge 生命周期 / aardvark / 策略路由
                               # (Debian 系安装到 /usr/lib/podman)
@@ -181,6 +184,7 @@ patches/crun/android-cgroup.patch
 - 设备上 podman 每次调用会拿 sqlite 全局锁；**shim 内禁止递归调用 podman**（setup 路径中 inspect 会死锁）——容器配置只能由 conmon wrapper 在容器启动后异步读取。
 - 容器镜像存储驱动：有内核 overlayfs 用 `overlay`，否则经 `fuse-overlayfs` 用 `overlay`，最后才退到 `vfs`；数据库后端 `sqlite`（boltdb 在该内核上 mmap 行为异常）。vfs 下每层、每个构建步骤都是整树复制，镜像稍大就不可用。切换驱动需清空 `/var/lib/containers/storage`（install.sh 会提示）。
 - 构建性能：containers/storage 每个进程会探测一次内核的 native diff 支持，失败则回退 naive diff——在安卓上探测总是失败（内核 overlayfs 时如此，配置 `mount_program`（如 fuse-overlayfs）时更是如此），导致每个构建步骤的 commit 都要对父层和当前层做两次全树遍历，而不是直接读 overlay 的 upperdir。DoA 在安装时对 podman 做二进制补丁（`patches/podman/naive-diff.py`）将该探测变成 no-op，从而始终使用 native diff；fuse-overlayfs 的 whiteout 与内核兼容，3×30MB 构建从约 25 秒降到约 14 秒。`podman build --squash` 仍可用于完全跳过中间层提交。
+- 粘性 ENOTEMPTY 损坏的复现方法（见"已知限制"）：`mid=$(podman inspect <c> | jq -r '.[0].GraphDriver.Data.MergedDir'); umount -l "$mid"; podman restart <c>`——libpod 会把普通 merged 目录填上骨架，`podman rm -f <c>` 即可验证 wrapper 的自动恢复（事先往 `$mid` 里放一个额外文件可验证拒绝逻辑）。
 - busybox 环境：无 `grep -P`、无 `PIPESTATUS`，脚本保持 POSIX。
 
 ## License

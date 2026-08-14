@@ -9,6 +9,7 @@ import ctypes
 import os
 import struct
 import sys
+import traceback
 
 HDR = struct.Struct("<IIQQLLII")  # len, opcode, unique, nodeid, uid, gid, pid, _
 INIT_OUT = struct.Struct("<IIIIIII")  # major, minor, max_readahead, flags, max_background, congestion_threshold, max_write
@@ -19,8 +20,18 @@ ATTR_OUT = struct.Struct("<QII",)  # attr_valid, attr_valid_ns, dummy
 OP_LOOKUP, OP_FORGET, OP_GETATTR, OP_READLINK = 1, 2, 3, 5
 OP_INIT, OP_OPENDIR, OP_READDIR, OP_RELEASEDIR = 26, 27, 28, 29
 OP_ACCESS, OP_DESTROY = 33, 37
-ENOENT, ENOSYS = 2, 38
+ENOENT, ENOSYS, EIO = 2, 38, 5
 S_IFLNK, S_IFDIR = 0o120000, 0o040000
+
+LOG = "/run/doa-tsd.log"  # tmpfs: crash forensics, gone at reboot
+
+
+def log(msg):
+    try:
+        with open(LOG, "a") as f:
+            f.write(msg.rstrip() + "\n")
+    except OSError:
+        pass
 
 libc = ctypes.CDLL(None, use_errno=True)
 BUF = 135168
@@ -52,39 +63,53 @@ def serve(fd):
     while True:
         buf = os.read(fd, BUF)
         if len(buf) < 40:
+            log("serve: short read (%d bytes), exiting" % len(buf))
             return
         _len, op, unique, nodeid, _uid, _gid, pid, _ = HDR.unpack_from(buf)
-        if op == OP_INIT:
-            # major/minor/max_readahead/flags/max_background/congestion_threshold/max_write (7.x-compatible reply)
-            reply(fd, unique, 0, INIT_OUT.pack(7, 22, 0, 0, 0, 0, 4096))
-        elif op == OP_DESTROY:
-            return
-        elif op == OP_FORGET:
-            continue  # no reply
-        elif op == OP_LOOKUP:
-            name = buf[40:].split(b"\0")[0].decode()
-            nid = names.get(name)
-            if nid is None:
-                nid = nextid
-                names[name] = nid
-                nextid += 1
-            reply(fd, unique, 0, entry(nid, S_IFLNK | 0o777))
-        elif op == OP_GETATTR:
-            if nodeid == 1:
-                reply(fd, unique, 0, ATTR_OUT.pack(0, 0, 0) + attr(1, S_IFDIR | 0o555))
+        try:
+            if op == OP_INIT:
+                # major/minor/max_readahead/flags/max_background/congestion_threshold/max_write (7.x-compatible reply)
+                reply(fd, unique, 0, INIT_OUT.pack(7, 22, 0, 0, 0, 0, 4096))
+            elif op == OP_DESTROY:
+                log("serve: OP_DESTROY, exiting")
+                return
+            elif op == OP_FORGET:
+                continue  # no reply
+            elif op == OP_LOOKUP:
+                name = buf[40:].split(b"\0")[0].decode()
+                nid = names.get(name)
+                if nid is None:
+                    nid = nextid
+                    names[name] = nid
+                    nextid += 1
+                reply(fd, unique, 0, entry(nid, S_IFLNK | 0o777))
+            elif op == OP_GETATTR:
+                if nodeid == 1:
+                    reply(fd, unique, 0, ATTR_OUT.pack(0, 0, 0) + attr(1, S_IFDIR | 0o555))
+                else:
+                    reply(fd, unique, 0, ATTR_OUT.pack(0, 0, 0) + attr(nodeid, S_IFLNK | 0o777))
+            elif op == OP_READLINK:
+                name = next(n for n, i in names.items() if i == nodeid)
+                reply(fd, unique, 0, b"/proc/%d/%s" % (pid, name.encode()))
+            elif op == OP_OPENDIR or op == OP_RELEASEDIR:
+                reply(fd, unique, 0, struct.pack("<IIII", 0, 0, 0, 0))  # fuse_open_out
+            elif op == OP_READDIR:
+                reply(fd, unique, 0)
+            elif op == OP_ACCESS:
+                reply(fd, unique, 0)
             else:
-                reply(fd, unique, 0, ATTR_OUT.pack(0, 0, 0) + attr(nodeid, S_IFLNK | 0o777))
-        elif op == OP_READLINK:
-            name = next(n for n, i in names.items() if i == nodeid)
-            reply(fd, unique, 0, b"/proc/%d/%s" % (pid, name.encode()))
-        elif op == OP_OPENDIR or op == OP_RELEASEDIR:
-            reply(fd, unique, 0, struct.pack("<IIII", 0, 0, 0, 0))  # fuse_open_out
-        elif op == OP_READDIR:
-            reply(fd, unique, 0)
-        elif op == OP_ACCESS:
-            reply(fd, unique, 0)
-        else:
-            reply(fd, unique, ENOSYS)
+                reply(fd, unique, ENOSYS)
+        except Exception:
+            # a killed request must not take the daemon down silently: every
+            # container start depends on this mount. log, fail the request,
+            # keep serving
+            log("op %d nodeid %d pid %d crashed:\n%s"
+                % (op, nodeid, pid, traceback.format_exc()))
+            try:
+                reply(fd, unique, EIO)
+            except OSError:
+                log("serve: fd broken after crash, exiting")
+                return
 
 
 def main():

@@ -93,6 +93,15 @@ for d in /usr/libexec/podman /usr/lib/podman; do
 done
 if [ -n "$nv" ] && command -v unshare >/dev/null 2>&1; then
   modprobe bridge veth nf_tables nf_nat 2>/dev/null
+  # netavark 1.16 shells out to the nft binary for NAT rules; native needs it
+  # at runtime anyway, so install it here or the probe always fails
+  if ! command -v nft >/dev/null 2>&1; then
+    if command -v apk >/dev/null 2>&1; then apk add nftables >/dev/null 2>&1
+    elif command -v apt-get >/dev/null 2>&1; then apt-get update >/dev/null 2>&1 && apt-get install -y nftables >/dev/null 2>&1
+    elif command -v dnf >/dev/null 2>&1; then dnf install -y nftables >/dev/null 2>&1
+    elif command -v pacman >/dev/null 2>&1; then pacman -Sy --noconfirm nftables >/dev/null 2>&1
+    fi
+  fi
   NP=/tmp/doa-cfg/netprobe
   rm -rf "$NP"; mkdir -p "$NP"
   cat > "$NP/doaprobe.json" <<'EOF'
@@ -100,10 +109,14 @@ if [ -n "$nv" ] && command -v unshare >/dev/null 2>&1; then
 EOF
   unshare -n sleep 20 & np_pid=$!
   sleep 1
-  if "$nv" --config "$NP" setup "/proc/$np_pid/ns/net" < "$NP/doaprobe.json" 2>/dev/null | grep -q '"eth0"'; then
+  # podman drives netavark with the containers.conf firewall driver; default
+  # to nftables here (iptables legacy is just as fine when it is the one
+  # installed)
+  fwd=nftables; command -v nft >/dev/null 2>&1 || fwd=iptables
+  if "$nv" --firewall-driver="$fwd" --config "$NP" setup "/proc/$np_pid/ns/net" < "$NP/doaprobe.json" 2>/dev/null | grep -q '"eth0"'; then
     net_backend=native
   fi
-  "$nv" --config "$NP" teardown "/proc/$np_pid/ns/net" < "$NP/doaprobe.json" >/dev/null 2>&1
+  "$nv" --firewall-driver="$fwd" --config "$NP" teardown "/proc/$np_pid/ns/net" < "$NP/doaprobe.json" >/dev/null 2>&1 || true
   kill "$np_pid" 2>/dev/null
   rm -rf "$NP"
 fi

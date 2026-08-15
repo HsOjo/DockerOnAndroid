@@ -80,11 +80,13 @@ fi
 crun_patch=0
 { [ "$memcg" = 0 ] || [ "$cpuset_ok" = 0 ] || [ "$pids_v2" = 0 ]; } && crun_patch=1
 
-# native bridge networking: usable when the kernel can do veth+bridge+nft NAT.
-# Probe empirically by having netavark itself set up a throwaway netns — the
-# exact component and code path production containers would use. Falls back
-# to the pasta shim (works with just NET_NS+TUN) when anything is missing.
+# native bridge networking: usable when the kernel can do veth+bridge plus
+# NAT via a firewall driver netavark supports. Probe empirically by having
+# netavark itself set up a throwaway netns — the exact component and code
+# path production containers would use. Falls back to the pasta shim (works
+# with just NET_NS+TUN) when anything is missing.
 net_backend=pasta
+net_fwdriver=
 nv=
 for d in /usr/libexec/podman /usr/lib/podman; do
   # prefer the pristine binary: netavark may already be the DoA wrapper
@@ -92,33 +94,39 @@ for d in /usr/libexec/podman /usr/lib/podman; do
   [ -z "$nv" ] && [ -f "$d/netavark" ] && ! grep -q DockerOnAndroid "$d/netavark" 2>/dev/null && nv=$d/netavark
 done
 if [ -n "$nv" ] && command -v unshare >/dev/null 2>&1; then
-  modprobe bridge veth nf_tables nf_nat 2>/dev/null
-  # netavark 1.16 shells out to the nft binary for NAT rules; native needs it
-  # at runtime anyway, so install it here or the probe always fails
-  if ! command -v nft >/dev/null 2>&1; then
-    if command -v apk >/dev/null 2>&1; then apk add nftables >/dev/null 2>&1
-    elif command -v apt-get >/dev/null 2>&1; then apt-get update >/dev/null 2>&1 && apt-get install -y nftables >/dev/null 2>&1
-    elif command -v dnf >/dev/null 2>&1; then dnf install -y nftables >/dev/null 2>&1
-    elif command -v pacman >/dev/null 2>&1; then pacman -Sy --noconfirm nftables >/dev/null 2>&1
+  modprobe bridge veth nf_tables nf_nat ip_tables iptable_nat ip6_tables ip6table_nat 2>/dev/null
+  # netavark shells out to the nft/iptables binaries for its rules; native
+  # needs one at runtime anyway, so install iptables here or a machine
+  # without either can never probe native (iptables covers kernels without
+  # NFT_FIB_INET, where netavark's nft hostport fib rules fail)
+  if ! command -v nft >/dev/null 2>&1 && ! command -v iptables >/dev/null 2>&1; then
+    if command -v apk >/dev/null 2>&1; then apk add iptables >/dev/null 2>&1
+    elif command -v apt-get >/dev/null 2>&1; then apt-get update >/dev/null 2>&1 && apt-get install -y iptables >/dev/null 2>&1
+    elif command -v dnf >/dev/null 2>&1; then dnf install -y iptables >/dev/null 2>&1
+    elif command -v pacman >/dev/null 2>&1; then pacman -Sy --noconfirm iptables >/dev/null 2>&1
     fi
   fi
   NP=/tmp/doa-cfg/netprobe
-  rm -rf "$NP"; mkdir -p "$NP"
-  cat > "$NP/doaprobe.json" <<'EOF'
+  cat > /tmp/doa-cfg-probe.json <<'EOF'
 {"container_id":"doaprobe","container_name":"doaprobe","port_mappings":[],"networks":{"doaprobe":{"static_ips":["10.250.0.2"],"interface_name":"eth0"}},"network_info":{"doaprobe":{"name":"doaprobe","id":"doaprobe0","driver":"bridge","network_interface":"doaprobe0","subnets":[{"subnet":"10.250.0.0/24","gateway":"10.250.0.1"}],"ipv6_enabled":false,"internal":false,"dns_enabled":false}}}
 EOF
-  unshare -n sleep 20 & np_pid=$!
-  sleep 1
-  # podman drives netavark with the containers.conf firewall driver; default
-  # to nftables here (iptables legacy is just as fine when it is the one
-  # installed)
-  fwd=nftables; command -v nft >/dev/null 2>&1 || fwd=iptables
-  if "$nv" --firewall-driver="$fwd" --config "$NP" setup "/proc/$np_pid/ns/net" < "$NP/doaprobe.json" 2>/dev/null | grep -q '"eth0"'; then
-    net_backend=native
-  fi
-  "$nv" --firewall-driver="$fwd" --config "$NP" teardown "/proc/$np_pid/ns/net" < "$NP/doaprobe.json" >/dev/null 2>&1 || true
-  kill "$np_pid" 2>/dev/null
-  rm -rf "$NP"
+  for fwd in nftables iptables; do
+    [ "$net_backend" = pasta ] || break
+    case $fwd in
+      nftables) command -v nft >/dev/null 2>&1 || continue;;
+      iptables) command -v iptables >/dev/null 2>&1 || continue;;
+    esac
+    rm -rf "$NP"; mkdir -p "$NP"
+    unshare -n sleep 20 & np_pid=$!
+    sleep 1
+    if "$nv" --firewall-driver="$fwd" --config "$NP" setup "/proc/$np_pid/ns/net" < /tmp/doa-cfg-probe.json 2>/dev/null | grep -q '"eth0"'; then
+      net_backend=native; net_fwdriver=$fwd
+    fi
+    "$nv" --firewall-driver="$fwd" --config "$NP" teardown "/proc/$np_pid/ns/net" < /tmp/doa-cfg-probe.json >/dev/null 2>&1 || true
+    kill "$np_pid" 2>/dev/null
+    rm -rf "$NP"
+  done
+  rm -f /tmp/doa-cfg-probe.json
 fi
 
 # pasta needs TUN (module or built-in); without it the fallback backend is
@@ -195,12 +203,13 @@ CRUN_PATCH=$crun_patch
 FOV_PATCH=$fov_patch
 WMEM_FIX=$wmem_fix
 NET_BACKEND=$net_backend
+NET_FWDRIVER=$net_fwdriver
 INET_GID=$inet_gid
 GRAPHROOT=$graphroot
 EOF
 
 echo "probes:   userns=$ns_user ipcns=$ns_ipc pidns=$ns_pid utsns=$ns_uts overlayfs=$([ "$storage" = overlay ] && echo 1 || echo 0) lo_ok=$((1-lo_fix)) cgroup_ok=$((1-cgroup_fix)) thread_self=$((1-ts_fix)) memcg=$memcg cpuset_ok=$cpuset_ok pids_v2=$pids_v2 tun=$tun_ok inet_gid=${inet_gid:-none}"
-echo "config:   storage=$storage backend=$net_backend podman_wrapper=$podman_wrapper crun_nomq=$crun_nomq crun_patch=$crun_patch fov_patch=$fov_patch ts_fix=$ts_fix"
+echo "config:   storage=$storage backend=$net_backend${net_fwdriver:+($net_fwdriver)} podman_wrapper=$podman_wrapper crun_nomq=$crun_nomq crun_patch=$crun_patch fov_patch=$fov_patch ts_fix=$ts_fix"
 [ "$net_backend" = pasta ] && [ ! -f rootfs/usr/local/bin/pasta ] && \
   echo "note:     no pasta binary yet; run ./build-pasta.sh before ./install.sh"
 [ "$crun_patch" = 1 ] && [ ! -f rootfs/usr/bin/crun-doa ] && \

@@ -84,7 +84,7 @@ podman 创建容器时会**主动 bind + LISTEN 每一个发布端口并持有 f
                       # 自行安装依赖); podman/conmon/netavark 备份为 *.real, 已有配置备份为 *.doa-bak
 ```
 
-`configure` 按设备裁剪安装项：`crun-nomq`（无 IPC_NS）、podman wrapper（无 USER_NS）、`utsns = "host"`（无 UTS_NS）、cgroup v1 挂载服务（开机未挂控制器时）、存储驱动（内核 overlayfs、fuse-overlayfs 或 vfs）均按需启用。重跑 `configure` + `install.sh` 会自动对账——不再需要的 podman wrapper 会从 `*.real` 恢复。（netavark 原生 bridge 路线经评估后放弃：安卓内核常见 filter 表只读、xt match 裁剪，用户态无法绕开。）
+`configure` 按设备裁剪安装项：`crun-nomq`（无 IPC_NS）、`utsns = "host"`（无 UTS_NS）、cgroup v1 挂载服务（开机未挂控制器时）、存储驱动（内核 overlayfs、fuse-overlayfs 或 vfs）均按需启用；podman wrapper 则始终安装——它对重启后存储挂载元数据残留（[podman#23504](https://github.com/containers/podman/issues/23504)）的 ENOTEMPTY 自动恢复适用于所有设备，不限于无 userns 的内核。重跑 `configure` + `install.sh` 会自动对账——不再需要的 wrapper 会从 `*.real` 恢复。（netavark 原生 bridge 路线经评估后放弃：安卓内核常见 filter 表只读、xt match 裁剪，用户态无法绕开。）
 
 设备端验证：
 
@@ -152,7 +152,7 @@ cp /usr/libexec/podman/netavark /usr/libexec/podman/netavark.real   # Debian 系
 - **EXPOSE 互联依赖异步 inspect**（容器启动后瞬时查询自身配置），极端时序下首条规则可能晚到数秒。
 - **有发布端口的容器存在启动用网竞态**：podman 持有端口预留直到容器启动，pasta 只能在后台重试绑定——entrypoint 启动即用网可能赶上亚秒级窗口。无发布端口的容器由 conmon 就绪门控保证，不受影响。
 - **版本绑定**：wrapper 依赖 podman 的 netavark 插件协议与 conmon 参数格式，仅[兼容性](#兼容性)中列出的版本经过验证。podman 包升级还会覆盖 wrapper——见[升级 podman](#升级-podman)。
-- **fuse-overlayfs 挂载丢失会让容器删除粘死（已自动恢复）**：若容器启动时其 `merged` 目录实际并未挂载（崩溃/非干净关机后存储元数据残留"已挂载"——上游 [podman#23504](https://github.com/containers/podman/issues/23504)，未修复），podman 会把容器配置文件（`etc/hosts`、`resolv.conf`、`hostname`、`run/.containerenv` 及空骨架目录）写进*普通目录*；此后每次 `rm` / `compose down` 都会死于 `replacing mount point ".../merged": directory not empty`，重试无效，storage 层容器泄漏进 `podman ps --storage`。podman wrapper 的 `rm`/`stop` 在目录*只含*上述已知 podman 生成文件时自动清理重试（podman-compose 也覆盖——它 shell 调 podman CLI）；出现任何其他文件意味着 overlay 丢失期间写入了真实容器数据，wrapper 会保留并给出人工恢复步骤。触发时请先用 `ps aux | grep fuse-overlayfs`、merged 目录列表和 `/proc/mounts` 取证——未解之谜是谁杀了 FUSE daemon（嫌疑：高负载下 Android LMK）。
+- **`merged` 挂载丢失会让容器删除粘死（已自动恢复）**：若容器启动时其 `merged` 目录实际并未挂载（崩溃/非干净关机后存储元数据残留"已挂载"——上游 [podman#23504](https://github.com/containers/podman/issues/23504)，未修复；fuse-overlayfs 和原生 overlay 都会出现——任何 `restart: always` 容器在开机时抢跑都可能中招），podman 会把容器配置文件（`etc/hosts`、`resolv.conf`、`hostname`、`run/.containerenv` 及空骨架目录）写进*普通目录*；此后每次 `rm` / `compose down` 都会死于 `replacing mount point ".../merged": directory not empty`，重试无效，storage 层容器泄漏进 `podman ps --storage`。podman wrapper 的 `rm`/`stop` 在目录*只含*上述已知 podman 生成文件时自动清理重试（podman-compose 也覆盖——它 shell 调 podman CLI）；出现任何其他文件意味着 overlay 丢失期间写入了真实容器数据，wrapper 会保留并给出人工恢复步骤。触发时请先用 `ps aux | grep fuse-overlayfs`、merged 目录列表和 `/proc/mounts` 取证——未解之谜是谁杀了 FUSE daemon（嫌疑：高负载下 Android LMK）。
 - **doa-tsd 死亡会导致所有容器无法启动**：thread-self FUSE shim 是单个 python 进程；一旦死亡，每次容器启动都报 `failed to bind mount ns at /run/netns/...: transport endpoint is not connected`。用 `rc-service doa-tsd restart` 恢复。
 - **不支持 3.10 内核（如 Xiaomi kenzo）**：反复建删 netns 时内核会把引用泄漏到垂死 netns 的 `lo` 上，随后 `cleanup_net` 永远自旋在 `unregister_netdevice: waiting for lo to become free. Usage count = 5` 并持有 `rtnl_mutex`——此后所有 `podman run/start` 乃至 `ip addr` 都 D 态卡死，只有重启能恢复。kenzo 的 3.10.73 上完整测试套件 3/3 复现（约 80-100 分钟处，总在容器 teardown 之后）；隔离复现循环（裸 netns、tap+DAD、pasta+v6）均不触发。引用泄漏源于 netns 存活期的流量/addrconf，上游修复落在 3.10.107/108，kenzo 内核版本低于此。长驻容器几乎不走 netns 销毁路径，但任何高频起停场景（CI、测试套件）都会致命。用户态缓解（关 DAD、teardown 前清 lo 地址）已实测无效。
 

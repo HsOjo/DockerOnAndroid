@@ -165,7 +165,10 @@ if [ -z "$graphroot" ] && [ -f "$CONF" ]; then
   graphroot=$(sed -n 's/^GRAPHROOT=//p' "$CONF")
 fi
 
-podman_wrapper=0; [ "$ns_user" = 0 ] && podman_wrapper=1
+# the podman wrapper is unconditional: beyond the userns warning its ENOTEMPTY
+# auto-recovery covers stale post-reboot mount metadata (podman#23504), which
+# any device with restart-policy containers can hit regardless of namespaces
+podman_wrapper=1
 crun_nomq=0; [ "$ns_ipc" = 0 ] && crun_nomq=1
 
 # aid_inet gid required for sockets? Android's paranoid-network check

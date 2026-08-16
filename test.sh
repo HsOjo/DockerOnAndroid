@@ -31,6 +31,15 @@ SCALE=${DOAT_TW_SCALE:-1}
 pass=0 fail=0
 ok()  { pass=$((pass+1)); echo "ok   - $1"; }
 bad() { fail=$((fail+1)); echo "FAIL - $1"; }
+skip() { echo "skip - $1"; }
+
+# pasta-backend-only assertions (pasta process lifecycle, source policy
+# routing, aardvark FQDN records) are meaningless under the native bridge
+# backend; config.env records what install.sh deployed
+NET_BACKEND=pasta
+[ -f config.env ] && . ./config.env
+tp()  { if [ "$NET_BACKEND" = pasta ]; then t "$@";  else skip "$1"; fi; }
+twp() { if [ "$NET_BACKEND" = pasta ]; then tw "$@"; else skip "$1"; fi; }
 t()    { if sh -c "$2" >/dev/null 2>&1; then ok "$1"; else bad "$1"; fi; }
 tnot() { if sh -c "$2" >/dev/null 2>&1; then bad "$1"; else ok "$1"; fi; }
 
@@ -89,7 +98,7 @@ t "race: entrypoint online at start" "podman run --rm --pull=never $IMG_ALP ping
 # hp==cp publishes: the wildcard rule must not be duplicated as a cip-direct
 # rule - pasta dies on the forwarding conflict otherwise
 podman run -d --pull=never --name $P-sp -p $P_SP:80 -p $P_SAME:$P_SAME "$IMG_WEB" >/dev/null
-tw "same-port: pasta survives" "p=\$(cat $STATE/\$(podman inspect -f '{{.Id}}' $P-sp 2>/dev/null).pastapid.* 2>/dev/null); [ -n \"\$p\" ] && kill -0 \$p 2>/dev/null" 15
+twp "same-port: pasta survives" "p=\$(cat $STATE/\$(podman inspect -f '{{.Id}}' $P-sp 2>/dev/null).pastapid.* 2>/dev/null); [ -n \"\$p\" ] && kill -0 \$p 2>/dev/null" 15
 tw "same-port: published port works" "wget -q -O /dev/null --timeout=5 http://127.0.0.1:$P_SP/" 15
 t "same-port: host listens on hp==cp port" "netstat -tln 2>/dev/null | grep -q ':$P_SAME '"
 
@@ -117,7 +126,7 @@ sleep 1
 t "multi: two interfaces" "[ \$(podman exec $P-multi ip addr show scope global | grep -c 'inet ') -ge 2 ]"
 # podman assigns interfaces alphabetically, so either network may be the
 # primary; the secondary one must carry a source policy rule
-t "multi: source policy rule" "podman exec $P-multi ip rule | grep -q 'from 10.'"
+tp "multi: source policy rule" "podman exec $P-multi ip rule | grep -q 'from 10.'"
 
 echo "== internal network =="
 podman network create --internal $P-int >/dev/null
@@ -133,7 +142,7 @@ podman network create $P-dns >/dev/null
 podman run -d --pull=never --name $P-a --network $P-dns "$IMG_WEB" >/dev/null
 podman run -d --pull=never --name $P-b --network $P-dns "$IMG_ALP" sleep 86400 >/dev/null
 tw "dns: short name resolves" "podman exec $P-b ping -c1 -W2 $P-a" 15
-tw "dns: FQDN resolves" "podman exec $P-b ping -c1 -W2 $P-a.$P-dns" 10
+twp "dns: FQDN resolves" "podman exec $P-b ping -c1 -W2 $P-a.$P-dns" 10
 
 echo "== EXPOSE interconnect =="
 podman run -d --pull=never --name $P-exp --expose 80 "$IMG_WEB" >/dev/null
@@ -152,7 +161,7 @@ pp0=$(cat $STATE/$cid.pastapid.* 2>/dev/null | head -1)
 podman restart $P-web >/dev/null
 tw "restart: published port survives" "wget -q -O /dev/null --timeout=5 http://127.0.0.1:$P_WEB/" 20
 # pastapid lands ~1s after pasta binds the port: poll instead of reading once
-tw "restart: pasta relaunched on new netns" "p=\$(cat $STATE/$cid.pastapid.* 2>/dev/null); [ -n \"\$p\" ] && [ \"\$p\" != \"$pp0\" ] && kill -0 \$p 2>/dev/null" 20
+twp "restart: pasta relaunched on new netns" "p=\$(cat $STATE/$cid.pastapid.* 2>/dev/null); [ -n \"\$p\" ] && [ \"\$p\" != \"$pp0\" ] && kill -0 \$p 2>/dev/null" 20
 podman stop $P-web >/dev/null
 podman start $P-web >/dev/null
 tw "stop/start: published port back" "wget -q -O /dev/null --timeout=5 http://127.0.0.1:$P_WEB/" 20
@@ -160,7 +169,7 @@ tw "stop/start: published port back" "wget -q -O /dev/null --timeout=5 http://12
 echo "== pasta crash auto-restart =="
 pp2=$(cat $STATE/$cid.pastapid.* 2>/dev/null | head -1)
 kill "$pp2" 2>/dev/null
-tw "crash: supervisor relaunches pasta" "p=\$(cat $STATE/$cid.pastapid.* 2>/dev/null); [ -n \"\$p\" ] && [ \"\$p\" != \"$pp2\" ] && kill -0 \$p 2>/dev/null" 20
+twp "crash: supervisor relaunches pasta" "p=\$(cat $STATE/$cid.pastapid.* 2>/dev/null); [ -n \"\$p\" ] && [ \"\$p\" != \"$pp2\" ] && kill -0 \$p 2>/dev/null" 20
 tw "crash: port works after relaunch" "wget -q -O /dev/null --timeout=5 http://127.0.0.1:$P_WEB/" 10
 
 echo "== teardown cleanup =="

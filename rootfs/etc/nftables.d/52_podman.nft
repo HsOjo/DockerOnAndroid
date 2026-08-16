@@ -1,0 +1,13 @@
+#!/usr/sbin/nft -f
+# DockerOnAndroid: postmarketOS's inet-filter firewall sets forward (and
+# input) policy drop and only whitelists docker*/wlan*/usb* (51_docker.nft);
+# netavark's podman* bridges get no forwarding without this snippet.
+table inet filter {
+	chain input {
+		iifname "podman*" accept comment "Allow incoming network traffic from Podman"
+	}
+
+	chain forward {
+		iifname "podman*" accept comment "Allow outgoing network traffic from Podman"
+	}
+}

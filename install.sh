@@ -190,6 +190,7 @@ if [ "$pasta_want" = 1 ]; then
   fi
 else
   grep -q DockerOnAndroid /etc/modules-load.d/tun.conf 2>/dev/null && rm -f /etc/modules-load.d/tun.conf
+  grep -q DockerOnAndroid /etc/nftables.d/52_podman.nft 2>/dev/null && rm -f /etc/nftables.d/52_podman.nft
   # netavark shells out to the driver's userspace binary at runtime
   if [ "$NET_FWDRIVER" = iptables ]; then
     command -v iptables >/dev/null 2>&1 || pkg_install iptables
@@ -206,6 +207,15 @@ else
   } > /.doa-conf.tmp
   install_file /.doa-conf.tmp /etc/modules-load.d/doa-native-net.conf
   FILES="$FILES /etc/modules-load.d/doa-native-net.conf"
+  # postmarketOS-style firewall (inet filter, forward policy drop, docker*-
+  # only whitelist) drops podman0 forwarding; /etc/nftables.d only exists on
+  # such systems. Apply with nft -f, not a service restart: a restart flushes
+  # netavark's own tables, breaking already-running containers
+  if [ -d /etc/nftables.d ]; then
+    install_file rootfs/etc/nftables.d/52_podman.nft /etc/nftables.d/52_podman.nft
+    nft list chain inet filter forward 2>/dev/null | grep -q '"podman\*"' || nft -f /etc/nftables.d/52_podman.nft
+    FILES="$FILES /etc/nftables.d/52_podman.nft"
+  fi
 fi
 
 if [ "$CGROUP_FIX" = 1 ]; then

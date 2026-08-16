@@ -31,6 +31,12 @@ if ! command -v podman >/dev/null 2>&1; then
   pkg_install podman netavark aardvark-dns
 fi
 
+# the openrc service script ships in a subpackage on Alpine
+if command -v rc-update >/dev/null 2>&1 && [ ! -f /etc/init.d/podman ]; then
+  echo "> installing podman-openrc (podman boot service)"
+  pkg_install podman-openrc || echo "warn: podman-openrc unavailable; podman will not start at boot" >&2
+fi
+
 # python3 powers the podman binary patches and the podman_compose probe below
 if ! command -v python3 >/dev/null 2>&1; then
   echo "> installing python3 (required by the podman binary patches)"
@@ -360,8 +366,15 @@ FILES="$FILES /etc/containers/containers.conf /etc/containers/storage.conf"
 echo "> manifest: $MANIFEST"
 
 # storage.conf changes only apply to new podman processes; bounce the API
-# service or the socket keeps serving the old graphroot/driver
-rc-service podman restart 2>/dev/null || true
+# service or the socket keeps serving the old graphroot/driver. Also enable
+# it at boot so the docker socket and containers' restart policies survive
+# reboots.
+if command -v rc-update >/dev/null 2>&1; then
+  rc-update add podman default
+  rc-service podman restart 2>/dev/null || true
+else
+  echo "warn: no openrc; podman will not start at boot (enable its systemd unit manually)" >&2
+fi
 
 have=$(podman info --format '{{.Store.GraphDriverName}} {{.Store.GraphRoot}}' 2>/dev/null || true)
 want="$DRIVER ${GRAPHROOT:-/var/lib/containers/storage}"

@@ -5,9 +5,16 @@
 # HEALTHCHECK stays in "starting" forever and docker compose hangs on
 # depends_on: service_healthy. Mirrors docker semantics: each container is
 # checked at its own configured interval (default 30s upstream).
-# usage: doa-healthcheckd [tick-seconds]   (poll granularity, default 5)
+#
+# Event-driven: a persistent 'podman events' stream reports container
+# start/stop, and the loop sleeps until the next healthcheck is due, so the
+# steady state costs zero podman forks. The tick argument is only a fallback
+# resync interval (full 'podman ps' reconciliation) in case the events
+# stream silently misses something; podman ps is also run once at startup
+# and whenever the events stream has to be restarted.
+# usage: doa-healthcheckd [tick-seconds]   (fallback resync interval, default 60)
 set -u
-tick=${1:-5}
+tick=${1:-60}
 state=/run/doa-healthcheckd
 mkdir -p "$state"
 
@@ -30,27 +37,108 @@ interval_of() {
   cat "$f"
 }
 
-while :; do
-  now=$(date +%s)
-  ids=$(podman ps -q 2>/dev/null)
+# track a running container; first check is due immediately (mirrors the old
+# polling behaviour for a newly discovered container). ids are truncated to
+# the 12-char short form: 'podman ps -q' prints short ids while 'podman
+# events' reports full ids, and mixed forms would double-track a container.
+add_container() {
+  set -- "$(printf %.12s "$1")"
+  ivl=$(interval_of "$1")
+  if [ "$ivl" -gt 0 ] 2>/dev/null; then
+    [ -f "$state/$1.due" ] || date +%s > "$state/$1.due"
+  else
+    rm -f "$state/$1.due" "$state/$1.interval"
+  fi
+}
+
+remove_container() {
+  set -- "$(printf %.12s "$1")"
+  rm -f "$state/$1.due" "$state/$1.interval"
+}
+
+# full reconciliation with podman ps; only run at startup, on events stream
+# recovery, and as a tick-interval fallback — never in the steady state
+sync_all() {
+  # normalize to space-separated so the case match below works regardless of
+  # whether ids are separated by spaces or newlines
+  ids=" $(podman ps -q 2>/dev/null | tr '\n' ' ') "
   for id in $ids; do
-    ivl=$(interval_of "$id")
-    [ "$ivl" -gt 0 ] 2>/dev/null || continue
-    duef=$state/$id.due
-    due=$(cat "$duef" 2>/dev/null || echo 0)
-    if [ "$now" -ge "$due" ]; then
-      podman healthcheck run "$id" >/dev/null 2>&1 || true
-      echo $(( $(date +%s) + ivl )) > "$duef"
-    fi
+    add_container "$id"
   done
-  # drop state of containers that are gone
   for f in "$state"/*.due "$state"/*.interval; do
     [ -e "$f" ] || continue
     id=${f%.*}; id=${id##*/}
-    case " $ids " in
+    case $ids in
       *" $id "*) ;;
-      *) rm -f "$state/$id".due "$state/$id".interval ;;
+      *) remove_container "$id" ;;
     esac
   done
-  sleep "$tick"
+  lastsync=$(date +%s)
+}
+
+# run all healthchecks that are due; echo the earliest next due timestamp
+# (0 = nothing scheduled)
+run_due() {
+  now=$(date +%s)
+  next=0
+  for duef in "$state"/*.due; do
+    [ -e "$duef" ] || continue
+    id=${duef%.*}; id=${id##*/}
+    due=$(cat "$duef" 2>/dev/null || echo 0)
+    if [ "$now" -ge "$due" ]; then
+      podman healthcheck run "$id" >/dev/null 2>&1 || true
+      echo $(( $(date +%s) + $(interval_of "$id") )) > "$duef"
+      due=$(cat "$duef")
+    fi
+    if [ "$next" -eq 0 ] || [ "$due" -lt "$next" ]; then
+      next=$due
+    fi
+  done
+  echo "$next"
+}
+
+fifo=$state/events
+start_events() {
+  rm -f "$fifo"
+  mkfifo "$fifo"
+  podman events --filter type=container \
+    --format '{{.Status}} {{.ID}}' > "$fifo" 2>/dev/null &
+  evpid=$!
+}
+
+sync_all
+start_events
+# hold the fifo open for the lifetime of the loop so the events writer never
+# blocks on open and we can read -t with a timeout against it
+exec 9< "$fifo"
+
+while :; do
+  next=$(run_due)
+  if [ "$next" -gt 0 ]; then
+    wait=$(( next - $(date +%s) ))
+    [ "$wait" -lt 1 ] && wait=1
+    [ "$wait" -gt "$tick" ] && wait=$tick
+  else
+    wait=$tick
+  fi
+  # shellcheck disable=SC3045  # read -t: busybox ash, not strict POSIX
+  if read -r -t "$wait" ev <&9; then
+    # shellcheck disable=SC2086  # intentional word splitting of "status id"
+    set -- $ev
+    st=$1 id=${2:-}
+    [ -n "$id" ] || continue
+    case $st in
+      start)                       add_container "$id" ;;
+      died|stop|kill|remove|prune) remove_container "$id" ;;
+    esac
+  elif ! kill -0 "$evpid" 2>/dev/null; then
+    # events stream died: reopen and reconcile anything missed while it was down
+    exec 9<&-
+    start_events
+    exec 9< "$fifo"
+    sync_all
+  elif [ $(( $(date +%s) - lastsync )) -ge "$tick" ]; then
+    # fallback resync in case the events stream silently missed something
+    sync_all
+  fi
 done

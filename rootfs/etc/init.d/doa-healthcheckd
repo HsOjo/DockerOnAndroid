@@ -1,5 +1,5 @@
 #!/sbin/openrc-run
-# shellcheck shell=busybox
+# shellcheck shell=sh
 # shellcheck disable=SC2034,SC2329 # openrc-run consumes description/depend/start externally
 # DockerOnAndroid: healthcheck scheduler. podman runs container healthchecks via
 # systemd transient timers; Android-class systems have no systemd, so healthchecks

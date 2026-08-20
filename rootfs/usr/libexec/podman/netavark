@@ -214,6 +214,7 @@ log "setup $cid ($cname) nets=$(printf '%s' "$nets" | tr '\n' ',') nsf=$nsf"
 # pasta opens /dev/net/tun with dropped caps (egid aid_inet); Android creates
 # the node 1000:1016 0660, which survives only until reboot. Only needed when
 # configure probed the kernel's paranoid-network check on (INET_GID set).
+# shellcheck disable=SC2157 # @INET_GID@ is a configure placeholder; empty after substitution when unneeded
 if [ -n "@INET_GID@" ] && [ -c /dev/net/tun ]; then
   chgrp @INET_GID@ /dev/net/tun 2>/dev/null; chmod 660 /dev/net/tun 2>/dev/null
 fi
@@ -651,6 +652,7 @@ chmod +x "$STATE/$cid.launch.sh"
 # Android-scale process counts
 nsino=$(stat -Lc %i "$nsf" 2>/dev/null || echo _)
 live=
+# shellcheck disable=SC2010 # /proc pids are numeric; ls+grep is deliberate (see above)
 case $(ls -l /proc/[0-9]*/ns/net 2>/dev/null | grep -m1 "net:\[$nsino\]") in
   ?*) live=1;;
 esac

@@ -13,6 +13,7 @@
 # the manifest by install.sh per ./configure's probe; default to the
 # historical 3003 when the manifest is absent
 INET_GID=3003
+# shellcheck disable=SC1091 # manifest is written by install.sh on the target
 [ -f /etc/dockeronandroid.manifest ] && . /etc/dockeronandroid.manifest
 
 bundle=

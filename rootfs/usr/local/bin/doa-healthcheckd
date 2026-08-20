@@ -4,7 +4,11 @@
 # timers; without systemd (Android chroots, postmarketOS) a container with a
 # HEALTHCHECK stays in "starting" forever and docker compose hangs on
 # depends_on: service_healthy. Mirrors docker semantics: each container is
-# checked at its own configured interval (default 30s upstream).
+# checked at its own configured interval (default 30s upstream). Docker's
+# start-period/start-interval semantics are mirrored (moby daemon/health.go):
+# while a container is within its start period and has never passed a check,
+# probes run at start-interval (default 5s) instead of interval, so slow-
+# starting services are detected healthy quickly.
 #
 # Event-driven: a persistent 'podman events' stream reports container
 # start/stop, and the loop sleeps until the next healthcheck is due, so the
@@ -27,12 +31,20 @@ dur_to_s() {
   echo "$total"
 }
 
-# container healthcheck interval in seconds (0 = none), cached per container id
-interval_of() {
-  f=$state/$1.interval
+# per-container healthcheck timing, fetched with a single inspect and cached:
+# echoes "interval-s start-period-s start-interval-s started-epoch"
+meta_of() {
+  id=$1
+  f=$state/$id.meta
   if [ ! -f "$f" ]; then
-    ns=$(podman inspect --format '{{.Config.Healthcheck.Interval}}' "$1" 2>/dev/null || echo 0s)
-    dur_to_s "${ns:-0s}" > "$f"
+    meta=$(podman inspect --format '{{.Config.Healthcheck.Interval}} {{.Config.Healthcheck.StartPeriod}} {{.Config.Healthcheck.StartInterval}} {{.State.StartedAt.Unix}}' "$id" 2>/dev/null) || meta=
+    if [ -z "$meta" ]; then
+      # older podman: Healthcheck has no StartInterval field, template fails
+      meta=$(podman inspect --format '{{.Config.Healthcheck.Interval}} 0s 0s {{.State.StartedAt.Unix}}' "$id" 2>/dev/null) || meta="0s 0s 0s 0"
+    fi
+    # shellcheck disable=SC2086  # intentional word splitting of the 4 fields
+    set -- $meta
+    echo "$(dur_to_s "${1:-0s}") $(dur_to_s "${2:-0s}") $(dur_to_s "${3:-0s}") ${4:-0}" > "$f"
   fi
   cat "$f"
 }
@@ -43,17 +55,18 @@ interval_of() {
 # events' reports full ids, and mixed forms would double-track a container.
 add_container() {
   set -- "$(printf %.12s "$1")"
-  ivl=$(interval_of "$1")
-  if [ "$ivl" -gt 0 ] 2>/dev/null; then
+  # shellcheck disable=SC2046  # word splitting of the meta fields is intended
+  set -- "$1" $(meta_of "$1")
+  if [ "$2" -gt 0 ] 2>/dev/null; then
     [ -f "$state/$1.due" ] || date +%s > "$state/$1.due"
   else
-    rm -f "$state/$1.due" "$state/$1.interval"
+    rm -f "$state/$1.due" "$state/$1.meta" "$state/$1.healthy"
   fi
 }
 
 remove_container() {
   set -- "$(printf %.12s "$1")"
-  rm -f "$state/$1.due" "$state/$1.interval"
+  rm -f "$state/$1.due" "$state/$1.meta" "$state/$1.healthy"
 }
 
 # full reconciliation with podman ps; only run at startup, on events stream
@@ -65,7 +78,7 @@ sync_all() {
   for id in $ids; do
     add_container "$id"
   done
-  for f in "$state"/*.due "$state"/*.interval; do
+  for f in "$state"/*.due "$state"/*.meta "$state"/*.healthy; do
     [ -e "$f" ] || continue
     id=${f%.*}; id=${id##*/}
     case $ids in
@@ -77,7 +90,9 @@ sync_all() {
 }
 
 # run all healthchecks that are due; echo the earliest next due timestamp
-# (0 = nothing scheduled)
+# (0 = nothing scheduled). Probe spacing mirrors moby daemon/health.go: within
+# the start period and never-healthy the step is start-interval (0 = default
+# 5s, matching docker), otherwise the regular interval.
 run_due() {
   now=$(date +%s)
   next=0
@@ -86,8 +101,18 @@ run_due() {
     id=${duef%.*}; id=${id##*/}
     due=$(cat "$duef" 2>/dev/null || echo 0)
     if [ "$now" -ge "$due" ]; then
-      podman healthcheck run "$id" >/dev/null 2>&1 || true
-      echo $(( $(date +%s) + $(interval_of "$id") )) > "$duef"
+      if podman healthcheck run "$id" >/dev/null 2>&1; then
+        touch "$state/$id.healthy"
+      fi
+      # shellcheck disable=SC2046  # intentional word splitting of meta fields
+      set -- $(meta_of "$id")
+      step=$1
+      if [ ! -f "$state/$id.healthy" ] && [ "${4:-0}" -gt 0 ] \
+         && [ $(( $(date +%s) - $4 )) -lt "${2:-0}" ]; then
+        step=${3:-0}
+        [ "$step" -gt 0 ] || step=5
+      fi
+      echo $(( $(date +%s) + step )) > "$duef"
       due=$(cat "$duef")
     fi
     if [ "$next" -eq 0 ] || [ "$due" -lt "$next" ]; then
@@ -128,7 +153,13 @@ while :; do
     st=$1 id=${2:-}
     [ -n "$id" ] || continue
     case $st in
-      start)                       add_container "$id" ;;
+      # a (re)start resets podman's health status to "starting", so drop any
+      # stale healthy marker and re-inspect: StartedAt/intervals may differ
+      start)
+        set -- "$(printf %.12s "$id")"
+        rm -f "$state/$1.healthy" "$state/$1.meta"
+        add_container "$1"
+        ;;
       died|stop|kill|remove|prune) remove_container "$id" ;;
     esac
   elif ! kill -0 "$evpid" 2>/dev/null; then
